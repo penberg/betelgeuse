@@ -1,0 +1,27 @@
+[package]
+name = "betelgeuse"
+version = "0.1.0"
+authors = ["Pekka Enberg"]
+edition = "2024"
+license = "MIT OR Apache-2.0"
+description = "A completion-based I/O library, designed as a foundation for deterministic simulation testing."
+
+[lib]
+path = "lib.rs"
+
+[[example]]
+name = "echo"
+path = "examples/echo/main.rs"
+
+[[example]]
+name = "memcached"
+path = "examples/memcached/main.rs"
+
+[dependencies]
+io-uring = "0.7.11"
+libc = "0.2"
+log = "0.4"
+
+[dev-dependencies]
+proptest = "1"
+tempfile = "3"
