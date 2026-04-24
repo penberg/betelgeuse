@@ -50,10 +50,6 @@ Out of scope: wire protocols, framing, buffer pools, state machines, WAL, consen
 - [`examples/echo`](examples/echo/README.md) - minimal TCP echo server showing the basic `server.step(); io_loop.step();` shape.
 - [`examples/memcached`](examples/memcached/README.md) - in-memory memcached-style server using the same completion-driven model on a less trivial protocol.
 
-## Status
-
-Early. The `syscall` and `io_uring` backends are working; the simulation backend is the next milestone. APIs will change.
-
 ## References
 
 [1] Peter Mbanugo (2026). [The Tokio/Rayon Trap and Why Async/Await Fails Concurrency](https://pmbanugo.me/blog/why-async-await-complect-concurrency).
