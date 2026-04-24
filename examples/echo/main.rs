@@ -20,17 +20,22 @@
 
 #![feature(allocator_api)]
 
+mod connection;
+mod listener;
+
 use std::{alloc::{Allocator, Global}, io, net::SocketAddr};
 
 use betelgeuse::{
-    Completion, CompletionResult, IO, IOBackend, IOHandle, IOLoop, IOSocket, io_loop,
-    slab::{Slab, SlabEntry},
+    CompletionResult, IO, IOBackend, IOHandle, IOLoop, IOSocket, io_loop,
+    slab::Slab,
 };
+
+use connection::Connection;
+use listener::Listener;
 
 const ADDR: &str = "127.0.0.1:5555";
 const MAX_LISTENERS: usize = 4;
 const MAX_CONNECTIONS: usize = 1024;
-const READ_CHUNK: usize = 8192;
 
 fn main() -> io::Result<()> {
     let backend = match std::env::var("BETELGEUSE_BACKEND").as_deref() {
@@ -206,162 +211,5 @@ impl<A: Allocator + Clone> Server<A> {
             conn.write_offset = 0;
             conn.arm_recv()
         }
-    }
-}
-
-enum ListenerState {
-    Free { next: Option<usize> },
-    Active { socket: Box<dyn IOSocket> },
-}
-
-struct Listener {
-    state: ListenerState,
-    accept_completion: Completion,
-}
-
-impl Listener {
-    fn activate(&mut self, socket: Box<dyn IOSocket>) -> io::Result<()> {
-        self.state = ListenerState::Active { socket };
-        self.accept_completion = Completion::new();
-        self.arm_accept()
-    }
-
-    fn accept_result_ready(&self) -> bool {
-        !matches!(self.state, ListenerState::Free { .. })
-            && self.accept_completion.has_result()
-    }
-
-    fn take_accept_result(&mut self) -> Option<io::Result<CompletionResult>> {
-        self.accept_completion.take_result()
-    }
-
-    fn arm_accept(&mut self) -> io::Result<()> {
-        let ListenerState::Active { socket } = &self.state else {
-            panic!("listener slot must be active before accept");
-        };
-        socket.accept(&mut self.accept_completion)
-    }
-}
-
-impl SlabEntry for Listener {
-    fn new_free(next: Option<usize>) -> Self {
-        Self {
-            state: ListenerState::Free { next },
-            accept_completion: Completion::new(),
-        }
-    }
-
-    fn is_free(&self) -> bool {
-        matches!(self.state, ListenerState::Free { .. })
-    }
-
-    fn next_free(&self) -> Option<usize> {
-        match self.state {
-            ListenerState::Free { next } => next,
-            ListenerState::Active { .. } => None,
-        }
-    }
-
-    fn release(&mut self, next: Option<usize>) {
-        if let ListenerState::Active { socket } =
-            std::mem::replace(&mut self.state, ListenerState::Free { next })
-        {
-            socket.close();
-        }
-        self.accept_completion = Completion::new();
-    }
-}
-
-enum ConnectionState {
-    Free { next: Option<usize> },
-    Open { socket: Box<dyn IOSocket> },
-}
-
-struct Connection {
-    state: ConnectionState,
-    write_buf: Vec<u8>,
-    write_offset: usize,
-    recv_completion: Completion,
-    send_completion: Completion,
-}
-
-impl Connection {
-    fn open(&mut self, socket: Box<dyn IOSocket>) -> io::Result<()> {
-        self.state = ConnectionState::Open { socket };
-        self.write_buf.clear();
-        self.write_offset = 0;
-        self.recv_completion = Completion::new();
-        self.send_completion = Completion::new();
-        self.arm_recv()
-    }
-
-    fn recv_result_ready(&self) -> bool {
-        matches!(self.state, ConnectionState::Open { .. })
-            && self.recv_completion.has_result()
-    }
-
-    fn send_result_ready(&self) -> bool {
-        matches!(self.state, ConnectionState::Open { .. })
-            && self.send_completion.has_result()
-    }
-
-    fn take_recv_result(&mut self) -> Option<io::Result<CompletionResult>> {
-        self.recv_completion.take_result()
-    }
-
-    fn take_send_result(&mut self) -> Option<io::Result<CompletionResult>> {
-        self.send_completion.take_result()
-    }
-
-    fn arm_recv(&mut self) -> io::Result<()> {
-        let ConnectionState::Open { socket } = &self.state else {
-            panic!("connection slot requires open socket");
-        };
-        socket.recv(&mut self.recv_completion, READ_CHUNK)
-    }
-
-    fn arm_send(&mut self) -> io::Result<()> {
-        let ConnectionState::Open { socket } = &self.state else {
-            panic!("connection slot requires open socket");
-        };
-        socket.send(
-            &mut self.send_completion,
-            self.write_buf[self.write_offset..].to_vec(),
-        )
-    }
-}
-
-impl SlabEntry for Connection {
-    fn new_free(next: Option<usize>) -> Self {
-        Self {
-            state: ConnectionState::Free { next },
-            write_buf: Vec::with_capacity(READ_CHUNK),
-            write_offset: 0,
-            recv_completion: Completion::new(),
-            send_completion: Completion::new(),
-        }
-    }
-
-    fn is_free(&self) -> bool {
-        matches!(self.state, ConnectionState::Free { .. })
-    }
-
-    fn next_free(&self) -> Option<usize> {
-        match self.state {
-            ConnectionState::Free { next } => next,
-            ConnectionState::Open { .. } => None,
-        }
-    }
-
-    fn release(&mut self, next: Option<usize>) {
-        if let ConnectionState::Open { socket } =
-            std::mem::replace(&mut self.state, ConnectionState::Free { next })
-        {
-            socket.close();
-        }
-        self.write_buf.clear();
-        self.write_offset = 0;
-        self.recv_completion = Completion::new();
-        self.send_completion = Completion::new();
     }
 }
