@@ -20,7 +20,7 @@
 
 #![feature(allocator_api)]
 
-use std::{alloc::Global, io, net::SocketAddr};
+use std::{alloc::{Allocator, Global}, io, net::SocketAddr};
 
 use betelgeuse::{
     Completion, CompletionResult, IO, IOBackend, IOHandle, IOLoop, IOSocket, io_loop,
@@ -37,10 +37,11 @@ fn main() -> io::Result<()> {
         Ok("syscall") => IOBackend::Syscall,
         _ => IOBackend::IoUring,
     };
-    let io_loop = io_loop(Global, backend)?;
+    let allocator = Global;
+    let io_loop = io_loop(allocator, backend)?;
     let addr: SocketAddr = ADDR.parse().expect("valid address");
 
-    let mut server = Server::new(io_loop.io());
+    let mut server = Server::new(allocator, io_loop.io());
     server.listen(addr)?;
     println!(
         "echo listening on {addr} (backend: {})",
@@ -53,18 +54,18 @@ fn main() -> io::Result<()> {
     }
 }
 
-struct Server {
+struct Server<A: Allocator + Clone> {
     io: IOHandle,
-    listeners: Slab<Listener, Global>,
-    connections: Slab<Connection, Global>,
+    listeners: Slab<Listener, A>,
+    connections: Slab<Connection, A>,
 }
 
-impl Server {
-    fn new(io: IOHandle) -> Self {
+impl<A: Allocator + Clone> Server<A> {
+    fn new(allocator: A, io: IOHandle) -> Self {
         Self {
             io,
-            listeners: Slab::new(Global, MAX_LISTENERS),
-            connections: Slab::new(Global, MAX_CONNECTIONS),
+            listeners: Slab::new(allocator.clone(), MAX_LISTENERS),
+            connections: Slab::new(allocator, MAX_CONNECTIONS),
         }
     }
 
