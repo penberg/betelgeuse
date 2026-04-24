@@ -7,16 +7,8 @@ on the hot path.
 
 ## Run
 
-Default (`io_uring`):
-
 ```sh
 cargo run --example memcached
-```
-
-Syscall backend:
-
-```sh
-BETELGEUSE_BACKEND=syscall cargo run --example memcached
 ```
 
 The server listens on `127.0.0.1:11211`.

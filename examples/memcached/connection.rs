@@ -1,9 +1,6 @@
 use std::{collections::HashMap, io};
 
-use betelgeuse::{
-    Completion, CompletionResult, IOSocket,
-    slab::SlabEntry,
-};
+use betelgeuse::{Completion, CompletionResult, IOSocket, slab::SlabEntry};
 
 pub const READ_CHUNK: usize = 8192;
 pub const VERSION: &str = "betelgeuse-memcached 0.1";
@@ -31,13 +28,11 @@ impl Connection {
     }
 
     pub fn recv_result_ready(&self) -> bool {
-        matches!(self.state, ConnectionState::Open { .. })
-            && self.recv_completion.has_result()
+        matches!(self.state, ConnectionState::Open { .. }) && self.recv_completion.has_result()
     }
 
     pub fn send_result_ready(&self) -> bool {
-        matches!(self.state, ConnectionState::Open { .. })
-            && self.send_completion.has_result()
+        matches!(self.state, ConnectionState::Open { .. }) && self.send_completion.has_result()
     }
 
     pub fn take_recv_result(&mut self) -> Option<io::Result<CompletionResult>> {
@@ -257,9 +252,7 @@ impl ProtocolState {
             if let Some(item) = store.get(*key) {
                 self.queue_response(b"VALUE ");
                 self.queue_response(key);
-                self.queue_response(
-                    format!(" {} {}\r\n", item.flags, item.value.len()).as_bytes(),
-                );
+                self.queue_response(format!(" {} {}\r\n", item.flags, item.value.len()).as_bytes());
                 self.queue_response(&item.value);
                 self.queue_response(CRLF);
             }

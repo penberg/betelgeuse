@@ -22,8 +22,8 @@ two objects.
 
 Two long-lived objects cooperate:
 
-- an **I/O loop** that drives a concrete backend (for example `io_uring`,
-  blocking syscalls, or a deterministic simulator)
+- an **I/O loop** that drives a concrete backend (for example Linux
+  `io_uring`, Darwin `kqueue`, or a deterministic simulator)
 - a **server** that owns the application's state machines
 
 ```rust
@@ -85,7 +85,7 @@ The per-operation flow:
 
 1. the caller prepares or reuses a `Completion`
 2. the caller submits work through a file or socket handle
-3. the backend translates the operation into a syscall or `io_uring`
+3. the backend translates the operation into the platform backend
    submission
 4. the backend later completes the same `Completion`
 5. the caller observes a semantic `CompletionResult` and reuses the slot
@@ -98,7 +98,8 @@ Long-lived state machines naturally own long-lived completions:
   polling the backend directly
 
 Higher layers stay backend-agnostic. They reason about `CompletionResult`,
-not about `epoll`, `io_uring`, or errno retries. Transient conditions such
+not about backend-specific mechanics (`kqueue`, `io_uring`, or errno retries).
+Transient conditions such
 as `EAGAIN`, `EWOULDBLOCK`, and `EINTR` stay inside the I/O layer.
 
 ## Owned State Machines

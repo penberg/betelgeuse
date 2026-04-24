@@ -11,9 +11,8 @@
 //! Each slot type implements `SlabEntry`, so the slab owns its free list and
 //! the server never allocates on the hot path.
 //!
-//! Run one of:
+//! Run:
 //!     cargo run --example echo
-//!     BETELGEUSE_BACKEND=syscall cargo run --example echo
 //!
 //! Then in another terminal:
 //!     nc 127.0.0.1 5555
@@ -23,12 +22,13 @@
 mod connection;
 mod listener;
 
-use std::{alloc::{Allocator, Global}, io, net::SocketAddr};
-
-use betelgeuse::{
-    CompletionResult, IO, IOBackend, IOHandle, IOLoop, IOSocket, io_loop,
-    slab::Slab,
+use std::{
+    alloc::{Allocator, Global},
+    io,
+    net::SocketAddr,
 };
+
+use betelgeuse::{CompletionResult, IO, IOHandle, IOLoop, IOSocket, io_loop, slab::Slab};
 
 use connection::Connection;
 use listener::Listener;
@@ -38,12 +38,8 @@ const MAX_LISTENERS: usize = 4;
 const MAX_CONNECTIONS: usize = 1024;
 
 fn main() -> io::Result<()> {
-    let backend = match std::env::var("BETELGEUSE_BACKEND").as_deref() {
-        Ok("syscall") => IOBackend::Syscall,
-        _ => IOBackend::IoUring,
-    };
     let allocator = Global;
-    let io_loop = io_loop(allocator, backend)?;
+    let io_loop = io_loop(allocator)?;
     let addr: SocketAddr = ADDR.parse().expect("valid address");
 
     let mut server = Server::new(allocator, io_loop.io());
