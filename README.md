@@ -4,30 +4,19 @@
   Completion-based I/O for Rust. No runtime, no hidden tasks.
 </p>
 
-## Motivation
+## 💡 Why
 
-Asynchronous I/O in Rust is supported with with futures using the `async` and
-`await` keywords, which are easy to use and backed by a large ecosystem,
-including [Tokio](https://tokio.rs/). However, the model has problems that
-matter under load [[1]](#references):
+Asynchronous I/O is a must for modern servers: blocking a thread per operation does not scale because it cannot leverage the parallelism of storage and network devices. In Rust, that usually means using futures with `async` and `await`, backed by a large ecosystem including [Tokio](https://tokio.rs/). However, the futures model has problems that matter for high-performance servers under load [[2]](#references):
 
-- A CPU-heavy section stalls the cooperative executor.
-- `tokio::spawn()` accepts any amount of work until queues grow past OOM.
-- Work-stealing migrates state machines between cores and pays the cache-miss tax.
-- The programmer ends up as the human in the loop scheduler.
+The model is designed for multi-threading, which can itself hinder high performance due to synchronization.
+You can spawn any amount of work by default until queues grow beyond memory limits.
+Work-stealing moves computation between cores, resulting in CPU cache misses.
 
-Betelgeuse takes a different direction for asynchronous I/O. A single thread
-loops forever, calling `step()` on two objects: the server and the I/O loop.
-Completions are owned by the caller, state transitions happen in one place, and
-nothing advances unless something explicitly asks it to. No waker, no executor,
-no hidden tasks.
+Betelgeuse takes a different direction for asynchronous I/O, inspired by [TigerBeetle](https://github.com/tigerbeetle/tigerbeetle). A single thread loops forever, calling `step()` on two objects: the server and the I/O loop. The caller owns completions; state transitions happen in one place, and nothing advances unless explicitly asked to—no waker, no executor, no hidden tasks. Modern I/O devices are fast enough that CPU-side abstractions and kernel overhead can become the bottleneck, so Betelgeuse aims to keep that path direct and eliminate as much overhead as possible [[1]](#references).
 
-Deterministic simulation testing falls out for free. Once nothing runs on its
-own, a simulation backend can drive the same server binary under controlled
-time, I/O ordering, and fault injection — without changing a line of
-application code.
+The I/O model also works well with deterministic simulation testing. Once nothing runs on its own, a simulation backend can drive the same server binary under controlled time, I/O ordering, and fault injection — without changing a line of application code.
 
-## Scope
+## 🎯 Scope
 
 Betelgeuse is deliberately small. It is not a runtime, not a framework, and not an async ecosystem.
 
@@ -39,17 +28,19 @@ In scope:
 
 Out of scope: wire protocols, framing, buffer pools, state machines, WAL, consensus, client sessions. Those belong in the systems built on top of Betelgeuse.
 
-## Design
+## ⚙️ Design
 
 - **Completion-based, not `async`/`await`.** Callers prepare an operation, hand a `&mut Completion` to the backend, and later observe a semantic result in the same slot. No futures, no executors, no hidden tasks.
 - **Caller owns the slot.** Long-lived state machines keep persistent completion slots; synchronous bootstrap code can allocate one on the stack. The backend never allocates on the hot path.
 - **One interface, many backends.** `IOLoop` drives the backend forward; `IO` submits work. A simulation backend can implement both without any kernel calls, giving DST full control over time, ordering, and faults.
 
-## Examples
+## 🧪 Examples
 
 - [`examples/echo`](examples/echo/README.md) - minimal TCP echo server showing the basic `server.step(); io_loop.step();` shape.
 - [`examples/memcached`](examples/memcached/README.md) - in-memory memcached-style server using the same completion-driven model on a less trivial protocol.
 
-## References
+## 🔗 References
 
-[1] Peter Mbanugo (2026). [The Tokio/Rayon Trap and Why Async/Await Fails Concurrency](https://pmbanugo.me/blog/why-async-await-complect-concurrency).
+[1] Pekka Enberg, Ashwin Rao, and Sasu Tarkoma (2019). [I/O Is Faster Than the CPU - Let's Partition Resources and Eliminate (Most) OS Abstractions](https://penberg.org/parakernel-hotos19.pdf).
+
+[2] Peter Mbanugo (2026). [The Tokio/Rayon Trap and Why Async/Await Fails Concurrency](https://pmbanugo.me/blog/why-async-await-complect-concurrency).
