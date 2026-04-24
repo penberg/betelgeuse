@@ -18,9 +18,11 @@ name = "memcached"
 path = "examples/memcached/main.rs"
 
 [dependencies]
-io-uring = "0.7.11"
 libc = "0.2"
 log = "0.4"
+
+[target.'cfg(target_os = "linux")'.dependencies]
+io-uring = "0.7.11"
 
 [dev-dependencies]
 proptest = "1"

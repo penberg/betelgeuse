@@ -1,9 +1,6 @@
 use std::io;
 
-use betelgeuse::{
-    Completion, CompletionResult, IOSocket,
-    slab::SlabEntry,
-};
+use betelgeuse::{Completion, CompletionResult, IOSocket, slab::SlabEntry};
 
 pub const READ_CHUNK: usize = 8192;
 
@@ -31,13 +28,11 @@ impl Connection {
     }
 
     pub fn recv_result_ready(&self) -> bool {
-        matches!(self.state, ConnectionState::Open { .. })
-            && self.recv_completion.has_result()
+        matches!(self.state, ConnectionState::Open { .. }) && self.recv_completion.has_result()
     }
 
     pub fn send_result_ready(&self) -> bool {
-        matches!(self.state, ConnectionState::Open { .. })
-            && self.send_completion.has_result()
+        matches!(self.state, ConnectionState::Open { .. }) && self.send_completion.has_result()
     }
 
     pub fn take_recv_result(&mut self) -> Option<io::Result<CompletionResult>> {

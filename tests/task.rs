@@ -14,11 +14,11 @@ use std::{
     path::PathBuf,
 };
 
-use betelgeuse::{IOBackend, IOLoop, IOLoopHandle, io_loop, op, spawn, task::Task};
+use betelgeuse::{IOLoop, IOLoopHandle, io_loop, op, spawn, task::Task};
 use tempfile::TempDir;
 
-fn make_loop(backend: IOBackend) -> IOLoopHandle<Global> {
-    io_loop(Global, backend).expect("io_loop construction failed")
+fn make_loop() -> IOLoopHandle<Global> {
+    io_loop(Global).expect("io_loop construction failed")
 }
 
 fn run_task<T, A: Allocator + Clone + 'static>(
@@ -42,13 +42,8 @@ macro_rules! task_test {
             fn run($io_loop: &IOLoopHandle<Global>) $body
 
             #[test]
-            fn syscall() {
-                run(&make_loop(IOBackend::Syscall));
-            }
-
-            #[test]
-            fn io_uring() {
-                run(&make_loop(IOBackend::IoUring));
+            fn native() {
+                run(&make_loop());
             }
         }
     };

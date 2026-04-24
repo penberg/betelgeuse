@@ -6,9 +6,8 @@
 //! `ProtocolState` struct so that the parser can be unit-tested without
 //! constructing a real socket.
 //!
-//! Run one of:
+//! Run:
 //!     cargo run --example memcached
-//!     BETELGEUSE_BACKEND=syscall cargo run --example memcached
 //!
 //! Then in another terminal:
 //!     nc 127.0.0.1 11211
@@ -23,12 +22,14 @@
 mod connection;
 mod listener;
 
-use std::{alloc::{Allocator, Global}, collections::HashMap, io, net::SocketAddr};
-
-use betelgeuse::{
-    CompletionResult, IO, IOBackend, IOHandle, IOLoop, IOSocket, io_loop,
-    slab::Slab,
+use std::{
+    alloc::{Allocator, Global},
+    collections::HashMap,
+    io,
+    net::SocketAddr,
 };
+
+use betelgeuse::{CompletionResult, IO, IOHandle, IOLoop, IOSocket, io_loop, slab::Slab};
 
 use connection::{Connection, Item, is_peer_disconnect};
 use listener::Listener;
@@ -38,12 +39,8 @@ const MAX_LISTENERS: usize = 4;
 const MAX_CONNECTIONS: usize = 1024;
 
 fn main() -> io::Result<()> {
-    let backend = match std::env::var("BETELGEUSE_BACKEND").as_deref() {
-        Ok("syscall") => IOBackend::Syscall,
-        _ => IOBackend::IoUring,
-    };
     let allocator = Global;
-    let io_loop = io_loop(allocator, backend)?;
+    let io_loop = io_loop(allocator)?;
     let addr: SocketAddr = ADDR.parse().expect("valid address");
 
     let mut server = Server::new(allocator, io_loop.io());

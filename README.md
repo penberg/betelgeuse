@@ -24,7 +24,7 @@ In scope:
 
 - A completion-based trait for files (`pread`, `pwrite`, `fsync`, `size`) and sockets (`bind`, `accept`, `recv`, `send`).
 - Caller-owned completion slots with a clear lifecycle.
-- Pluggable backends: `syscall` and `io_uring` for production, and a planned `simulation` backend that controls time, I/O ordering, and faults for deterministic simulation testing.
+- Pluggable native backends: `linux` (`io_uring`) and `darwin` (`kqueue`), plus a planned `simulation` backend that controls time, I/O ordering, and faults for deterministic simulation testing.
 
 Out of scope: wire protocols, framing, buffer pools, state machines, WAL, consensus, client sessions. Those belong in the systems built on top of Betelgeuse.
 

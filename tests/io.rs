@@ -1,6 +1,6 @@
 //! Integration tests for the Betelgeuse I/O interface.
 //!
-//! Each test is parameterized over both backends (`syscall`, `io_uring`) via
+//! Each test is parameterized over both native backends (`linux`, `darwin`) via
 //! the `io_test!` macro, so every contract is exercised against each concrete
 //! implementation. Tests share a small runtime harness: `make_loop` constructs
 //! an `IOLoopHandle`, `wait` pumps the loop until a given completion carries a
@@ -14,13 +14,11 @@ use std::{
     net::{SocketAddr, TcpStream},
 };
 
-use betelgeuse::{
-    Completion, CompletionResult, IO, IOBackend, IOLoop, IOLoopHandle, OpenOptions, io_loop,
-};
+use betelgeuse::{Completion, CompletionResult, IO, IOLoop, IOLoopHandle, OpenOptions, io_loop};
 use tempfile::TempDir;
 
-fn make_loop(backend: IOBackend) -> IOLoopHandle<Global> {
-    io_loop(Global, backend).expect("io_loop construction failed")
+fn make_loop() -> IOLoopHandle<Global> {
+    io_loop(Global).expect("io_loop construction failed")
 }
 
 fn wait(
@@ -58,13 +56,8 @@ macro_rules! io_test {
             fn run($io_loop: &IOLoopHandle<Global>) $body
 
             #[test]
-            fn syscall() {
-                run(&make_loop(IOBackend::Syscall));
-            }
-
-            #[test]
-            fn io_uring() {
-                run(&make_loop(IOBackend::IoUring));
+            fn native() {
+                run(&make_loop());
             }
         }
     };
@@ -73,7 +66,7 @@ macro_rules! io_test {
 io_test! {
     fn backend_name_survives_io_handle(io_loop) {
         let name = io_loop.backend_name();
-        assert!(name == "syscall" || name == "io_uring");
+        assert!(name == "linux" || name == "darwin");
         assert_eq!(io_loop.io().backend_name(), name);
     }
 }

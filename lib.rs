@@ -23,26 +23,13 @@
 #![feature(coroutines)]
 #![feature(stmt_expr_attributes)]
 
-use std::{alloc::Allocator, io, net::SocketAddr, path::Path, rc::Rc};
+use std::{alloc::Allocator, io as stdio, net::SocketAddr, path::Path, rc::Rc};
 
 pub mod completion;
-pub mod io_uring;
+pub mod io;
 pub mod op;
 pub mod slab;
-pub mod syscall;
 pub mod task;
-
-#[cfg(not(target_os = "linux"))]
-compile_error!("betelgeuse is supported on Linux only");
-
-/// Selects which I/O backend to instantiate.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum IOBackend {
-    /// Blocking/non-blocking syscalls with a poll loop.
-    Syscall,
-    /// `io_uring`-based backend.
-    IoUring,
-}
 
 pub use completion::{Completion, CompletionCallback, CompletionContext, CompletionResult};
 
@@ -64,7 +51,7 @@ pub trait IOLoop: IO {
     ///
     /// Returns `Ok(true)` when the backend submitted or completed at least one
     /// unit of work during this step, and `Ok(false)` when nothing progressed.
-    fn step(&self) -> io::Result<bool>;
+    fn step(&self) -> stdio::Result<bool>;
 }
 
 /// Submits file-system and socket operations to the backend.
@@ -75,13 +62,13 @@ pub trait IOLoop: IO {
 /// semantic [`CompletionResult`] values.
 pub trait IO {
     /// Opens a file with the requested [`OpenOptions`].
-    fn open(&self, path: &Path, options: OpenOptions) -> io::Result<Box<dyn IOFile>>;
+    fn open(&self, path: &Path, options: OpenOptions) -> stdio::Result<Box<dyn IOFile>>;
 
     /// Creates a new socket object owned by the caller.
-    fn socket(&self) -> io::Result<Box<dyn IOSocket>>;
+    fn socket(&self) -> stdio::Result<Box<dyn IOSocket>>;
 
     /// Submits a single-directory creation operation.
-    fn mkdir(&self, c: &mut Completion, path: &Path, mode: u32) -> io::Result<()>;
+    fn mkdir(&self, c: &mut Completion, path: &Path, mode: u32) -> stdio::Result<()>;
 
     /// Returns a short backend name for logging and diagnostics.
     fn backend_name(&self) -> &'static str;
@@ -108,16 +95,16 @@ pub struct OpenOptions {
 /// [`CompletionResult::Fsync`].
 pub trait IOFile {
     /// Reads up to `len` bytes starting at `offset`.
-    fn pread(&self, c: &mut Completion, len: usize, offset: u64) -> io::Result<()>;
+    fn pread(&self, c: &mut Completion, len: usize, offset: u64) -> stdio::Result<()>;
 
     /// Writes `buf` starting at `offset`.
-    fn pwrite(&self, c: &mut Completion, buf: Vec<u8>, offset: u64) -> io::Result<()>;
+    fn pwrite(&self, c: &mut Completion, buf: Vec<u8>, offset: u64) -> stdio::Result<()>;
 
     /// Flushes file data to stable storage.
-    fn fsync(&self, c: &mut Completion) -> io::Result<()>;
+    fn fsync(&self, c: &mut Completion) -> stdio::Result<()>;
 
     /// Reads the current file size.
-    fn size(&self, c: &mut Completion) -> io::Result<()>;
+    fn size(&self, c: &mut Completion) -> stdio::Result<()>;
 }
 
 /// Backend-agnostic socket operations.
@@ -127,21 +114,21 @@ pub trait IOFile {
 /// operations, subject to the rules imposed by the concrete backend.
 pub trait IOSocket {
     /// Binds the socket to `addr`.
-    fn bind(&self, addr: SocketAddr) -> io::Result<()>;
+    fn bind(&self, addr: SocketAddr) -> stdio::Result<()>;
 
     /// Accepts one inbound connection on a listening socket.
-    fn accept(&self, c: &mut Completion) -> io::Result<()>;
+    fn accept(&self, c: &mut Completion) -> stdio::Result<()>;
 
     /// Receives up to `len` bytes from a connected socket.
-    fn recv(&self, c: &mut Completion, len: usize) -> io::Result<()>;
+    fn recv(&self, c: &mut Completion, len: usize) -> stdio::Result<()>;
 
     /// Sends the contents of `buf` on a connected socket.
-    fn send(&self, c: &mut Completion, buf: Vec<u8>) -> io::Result<()>;
+    fn send(&self, c: &mut Completion, buf: Vec<u8>) -> stdio::Result<()>;
 
     /// Enables or disables the `TCP_NODELAY` socket option.
     ///
     /// Must be called on a connected stream socket.
-    fn set_nodelay(&self, on: bool) -> io::Result<()>;
+    fn set_nodelay(&self, on: bool) -> stdio::Result<()>;
 
     /// Closes the socket and releases any backend resources it owns.
     fn close(&self);
@@ -176,15 +163,15 @@ impl<A> From<(Rc<dyn IOLoop>, A)> for IOLoopHandle<A> {
 }
 
 impl<A> IO for IOLoopHandle<A> {
-    fn open(&self, path: &Path, options: OpenOptions) -> io::Result<Box<dyn IOFile>> {
+    fn open(&self, path: &Path, options: OpenOptions) -> stdio::Result<Box<dyn IOFile>> {
         self.inner.open(path, options)
     }
 
-    fn socket(&self) -> io::Result<Box<dyn IOSocket>> {
+    fn socket(&self) -> stdio::Result<Box<dyn IOSocket>> {
         self.inner.socket()
     }
 
-    fn mkdir(&self, c: &mut Completion, path: &Path, mode: u32) -> io::Result<()> {
+    fn mkdir(&self, c: &mut Completion, path: &Path, mode: u32) -> stdio::Result<()> {
         self.inner.mkdir(c, path, mode)
     }
 
@@ -194,21 +181,34 @@ impl<A> IO for IOLoopHandle<A> {
 }
 
 impl<A> IOLoop for IOLoopHandle<A> {
-    fn step(&self) -> io::Result<bool> {
+    fn step(&self) -> stdio::Result<bool> {
         self.inner.step()
     }
 }
 
-/// Creates the configured backend as a shared loop-capable handle.
-pub fn io_loop<A: Allocator + Clone>(
-    allocator: A,
-    io_backend: IOBackend,
-) -> io::Result<IOLoopHandle<A>> {
-    let inner: Rc<dyn IOLoop> = match io_backend {
-        IOBackend::Syscall => Rc::new(syscall::SyscallIO::new()),
-        IOBackend::IoUring => Rc::new(io_uring::IoUringIO::new()?),
-    };
-    Ok(IOLoopHandle::new(inner, allocator))
+/// Creates the native backend for the current target OS as a shared loop-capable handle.
+pub fn io_loop<A: Allocator + Clone>(allocator: A) -> stdio::Result<IOLoopHandle<A>> {
+    #[cfg(target_os = "linux")]
+    {
+        let inner: Rc<dyn IOLoop> = Rc::new(io::linux::IoUringIO::new()?);
+        return Ok(IOLoopHandle::new(inner, allocator));
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let inner: Rc<dyn IOLoop> = Rc::new(io::darwin::DarwinIO::new()?);
+        return Ok(IOLoopHandle::new(inner, allocator));
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    {
+        let _ = allocator;
+        Err(stdio::Error::new(
+            stdio::ErrorKind::Unsupported,
+            format!(
+                "betelgeuse is supported on Linux and macOS only (got {})",
+                std::env::consts::OS
+            ),
+        ))
+    }
 }
 
 impl<A> From<IOLoopHandle<A>> for IOHandle {
@@ -231,15 +231,15 @@ impl IOHandle {
 }
 
 impl IO for IOHandle {
-    fn open(&self, path: &Path, options: OpenOptions) -> io::Result<Box<dyn IOFile>> {
+    fn open(&self, path: &Path, options: OpenOptions) -> stdio::Result<Box<dyn IOFile>> {
         self.io_loop.open(path, options)
     }
 
-    fn socket(&self) -> io::Result<Box<dyn IOSocket>> {
+    fn socket(&self) -> stdio::Result<Box<dyn IOSocket>> {
         self.io_loop.socket()
     }
 
-    fn mkdir(&self, c: &mut Completion, path: &Path, mode: u32) -> io::Result<()> {
+    fn mkdir(&self, c: &mut Completion, path: &Path, mode: u32) -> stdio::Result<()> {
         self.io_loop.mkdir(c, path, mode)
     }
 

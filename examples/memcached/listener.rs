@@ -1,9 +1,6 @@
 use std::io;
 
-use betelgeuse::{
-    Completion, CompletionResult, IOSocket,
-    slab::SlabEntry,
-};
+use betelgeuse::{Completion, CompletionResult, IOSocket, slab::SlabEntry};
 
 enum ListenerState {
     Free { next: Option<usize> },
@@ -23,8 +20,7 @@ impl Listener {
     }
 
     pub fn accept_result_ready(&self) -> bool {
-        matches!(self.state, ListenerState::Active { .. })
-            && self.accept_completion.has_result()
+        matches!(self.state, ListenerState::Active { .. }) && self.accept_completion.has_result()
     }
 
     pub fn take_accept_result(&mut self) -> Option<io::Result<CompletionResult>> {

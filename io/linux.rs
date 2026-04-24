@@ -14,7 +14,7 @@ use std::{
 use io_uring::{IoUring, opcode, squeue, types};
 use log::trace;
 
-use super::{
+use crate::{
     AcceptOp, Completion, CompletionResult, FsyncOp, IO, IOFile, IOLoop, IOSocket, MkdirOp,
     OpenOptions, Operation, PReadOp, PWriteOp, RecvOp, SendOp, SizeOp,
 };
@@ -522,7 +522,7 @@ impl IO for IoUringIO {
     }
 
     fn backend_name(&self) -> &'static str {
-        "io_uring"
+        "linux"
     }
 }
 
@@ -588,9 +588,10 @@ impl IOLoop for IoUringIO {
                     .completion()
                     .next()
                     .expect("completion length checked above");
-                let completion_ptr = NonNull::new(cqe.user_data() as *mut Completion).ok_or_else(
-                    || io::Error::new(io::ErrorKind::InvalidData, "completion pointer missing"),
-                )?;
+                let completion_ptr =
+                    NonNull::new(cqe.user_data() as *mut Completion).ok_or_else(|| {
+                        io::Error::new(io::ErrorKind::InvalidData, "completion pointer missing")
+                    })?;
                 let completion = unsafe { completion_ptr.as_ptr().as_mut().expect("non-null") };
                 state.inflight = state
                     .inflight
