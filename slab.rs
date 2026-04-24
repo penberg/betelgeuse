@@ -42,6 +42,13 @@ impl<T: SlabEntry, A: Allocator> Slab<T, A> {
         self.entries.get_mut(id).filter(|entry| !entry.is_free())
     }
 
+    /// Returns a mutable iterator over all entries in the slab, both free and
+    /// occupied. Callers are expected to use [`SlabEntry::is_free`] to filter
+    /// when they only want occupied entries.
+    pub fn iter_mut(&mut self) -> std::slice::IterMut<'_, T> {
+        self.entries.iter_mut()
+    }
+
     /// Allocates one entry from the free list.
     pub fn acquire(&mut self) -> Option<usize> {
         let id = self.free_head?;
