@@ -15,8 +15,10 @@ use io_uring::{IoUring, opcode, squeue, types};
 use log::trace;
 
 use crate::{
-    AcceptOp, Completion, CompletionResult, FsyncOp, IO, IOFile, IOLoop, IOSocket, MkdirOp,
-    OpenOptions, Operation, PReadOp, PWriteOp, RecvOp, SendOp, SizeOp,
+    AcceptCompletion, AcceptOp, CompletionInner, FsyncCompletion, FsyncOp, IO, IOFile, IOLoop,
+    IOSocket, MkdirCompletion, MkdirOp, OpenOptions, Operation, PReadCompletion, PReadOp,
+    PWriteCompletion, PWriteOp, RecvCompletion, RecvOp, SendCompletion, SendOp, SizeCompletion,
+    SizeOp,
 };
 
 enum SocketKind {
@@ -49,7 +51,7 @@ impl Drop for OwnedFd {
 
 struct IoUringState {
     ring: IoUring,
-    queued: VecDeque<NonNull<Completion>>,
+    queued: VecDeque<NonNull<CompletionInner>>,
     inflight: usize,
 }
 
@@ -100,15 +102,7 @@ impl IoUringIO {
         }
     }
 
-    fn result_to_io(result: i32) -> io::Result<usize> {
-        if result >= 0 {
-            Ok(result as usize)
-        } else {
-            Err(io::Error::from_raw_os_error(-result))
-        }
-    }
-
-    fn should_retry(completion: &Completion, result: i32) -> bool {
+    fn should_retry(completion: &CompletionInner, result: i32) -> bool {
         let errno = -result;
         if result >= 0 {
             return false;
@@ -125,7 +119,7 @@ impl IoUringIO {
         }
     }
 
-    fn prepare_entry(c: &mut Completion) -> io::Result<squeue::Entry> {
+    fn prepare_entry(c: &mut CompletionInner) -> squeue::Entry {
         let entry = match c.operation_mut() {
             Operation::Accept(op) => {
                 opcode::Accept::new(types::Fd(op.fd), std::ptr::null_mut(), std::ptr::null_mut())
@@ -157,63 +151,107 @@ impl IoUringIO {
                     .mode(op.mode)
                     .build()
             }
-            Operation::Size(_) | Operation::Nop => {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidInput,
-                    "operation is not submitted via io_uring",
-                ));
+            Operation::Size(_) => {
+                unreachable!("Size is handled inline; should never reach prepare_entry")
             }
+            Operation::Nop => unreachable!("Nop cannot be queued"),
         };
-        Ok(entry.user_data(c as *mut Completion as u64))
+        entry.user_data(c as *mut CompletionInner as u64)
     }
 
-    fn decode_result(
-        state: &Rc<RefCell<IoUringState>>,
-        c: &mut Completion,
-        result: i32,
-    ) -> io::Result<CompletionResult> {
-        match c.operation_mut() {
+    /// Stores the typed result for the operation armed in `c` directly into
+    /// the wrapping typed completion.
+    ///
+    /// SAFETY in each arm: `c` is the inner of the typed completion that
+    /// armed the matching `Operation` variant. The IO methods that arm a
+    /// slot take `&mut <kind>Completion` and only set the matching
+    /// `Operation`, so the cast back is sound.
+    fn dispatch_complete(state: &Rc<RefCell<IoUringState>>, c: &mut CompletionInner, result: i32) {
+        match c.operation() {
             Operation::Accept(_) => {
-                let accepted = Self::result_to_io(result)? as RawFd;
-                Ok(CompletionResult::Accept(Box::new(IoUringSocket {
-                    state: state.clone(),
-                    fd: Rc::new(RefCell::new(Some(Rc::new(OwnedFd::new(accepted))))),
-                    kind: Rc::new(RefCell::new(Some(SocketKind::Stream))),
-                })))
+                let r = if result < 0 {
+                    Err(io_uring_err(result))
+                } else {
+                    Ok(Box::new(IoUringSocket {
+                        state: state.clone(),
+                        fd: Rc::new(RefCell::new(Some(Rc::new(OwnedFd::new(result as RawFd))))),
+                        kind: Rc::new(RefCell::new(Some(SocketKind::Stream))),
+                    }) as Box<dyn IOSocket>)
+                };
+                unsafe { AcceptCompletion::from_inner_mut(c) }.complete(r);
             }
-            Operation::Recv(op) => {
-                let n = Self::result_to_io(result)?;
-                op.buf.truncate(n);
-                Ok(CompletionResult::Recv(mem::take(&mut op.buf)))
+            Operation::Recv(_) => {
+                let r = if result < 0 {
+                    Err(io_uring_err(result))
+                } else {
+                    let Operation::Recv(op) = c.operation_mut() else {
+                        unreachable!()
+                    };
+                    op.buf.truncate(result as usize);
+                    Ok(mem::take(&mut op.buf))
+                };
+                unsafe { RecvCompletion::from_inner_mut(c) }.complete(r);
             }
-            Operation::Send(_) => Self::result_to_io(result).map(CompletionResult::Send),
-            Operation::PRead(op) => {
-                let n = Self::result_to_io(result)?;
-                op.buf.truncate(n);
-                Ok(CompletionResult::PRead(mem::take(&mut op.buf)))
+            Operation::Send(_) => {
+                let r = if result < 0 {
+                    Err(io_uring_err(result))
+                } else {
+                    Ok(result as usize)
+                };
+                unsafe { SendCompletion::from_inner_mut(c) }.complete(r);
             }
-            Operation::PWrite(_) => Self::result_to_io(result).map(CompletionResult::PWrite),
+            Operation::PRead(_) => {
+                let r = if result < 0 {
+                    Err(io_uring_err(result))
+                } else {
+                    let Operation::PRead(op) = c.operation_mut() else {
+                        unreachable!()
+                    };
+                    op.buf.truncate(result as usize);
+                    Ok(mem::take(&mut op.buf))
+                };
+                unsafe { PReadCompletion::from_inner_mut(c) }.complete(r);
+            }
+            Operation::PWrite(_) => {
+                let r = if result < 0 {
+                    Err(io_uring_err(result))
+                } else {
+                    Ok(result as usize)
+                };
+                unsafe { PWriteCompletion::from_inner_mut(c) }.complete(r);
+            }
             Operation::Fsync(_) => {
-                Self::result_to_io(result)?;
-                Ok(CompletionResult::Fsync)
+                let r = if result < 0 {
+                    Err(io_uring_err(result))
+                } else {
+                    Ok(())
+                };
+                unsafe { FsyncCompletion::from_inner_mut(c) }.complete(r);
             }
-            Operation::Size(op) => {
-                let mut stat = MaybeUninit::<libc::stat>::uninit();
-                let rc = unsafe { libc::fstat(op.fd, stat.as_mut_ptr()) };
-                if rc < 0 {
-                    return Err(io::Error::last_os_error());
-                }
-                let stat = unsafe { stat.assume_init() };
-                Ok(CompletionResult::Size(stat.st_size as u64))
+            Operation::Size(_) => {
+                let r = {
+                    let Operation::Size(op) = c.operation_mut() else {
+                        unreachable!()
+                    };
+                    let mut stat = MaybeUninit::<libc::stat>::uninit();
+                    if unsafe { libc::fstat(op.fd, stat.as_mut_ptr()) } < 0 {
+                        Err(io::Error::last_os_error())
+                    } else {
+                        let stat = unsafe { stat.assume_init() };
+                        Ok(stat.st_size as u64)
+                    }
+                };
+                unsafe { SizeCompletion::from_inner_mut(c) }.complete(r);
             }
             Operation::Mkdir(_) => {
-                Self::result_to_io(result)?;
-                Ok(CompletionResult::Mkdir)
+                let r = if result < 0 {
+                    Err(io_uring_err(result))
+                } else {
+                    Ok(())
+                };
+                unsafe { MkdirCompletion::from_inner_mut(c) }.complete(r);
             }
-            Operation::Nop => Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "completion has no operation",
-            )),
+            Operation::Nop => {}
         }
     }
 
@@ -287,37 +325,45 @@ impl IoUringIO {
 }
 
 impl IOFile for IoUringFile {
-    fn pread(&self, c: &mut Completion, len: usize, offset: u64) -> io::Result<()> {
-        c.prepare(Operation::PRead(PReadOp {
+    fn pread(&self, c: &mut PReadCompletion, len: usize, offset: u64) -> io::Result<()> {
+        let inner = c.inner_mut();
+        inner.prepare(Operation::PRead(PReadOp {
             fd: self.fd.raw(),
             buf: vec![0_u8; len],
             offset,
         }));
-        self.state.borrow_mut().queued.push_back(NonNull::from(c));
+        queue(&self.state, inner);
         Ok(())
     }
 
-    fn pwrite(&self, c: &mut Completion, buf: Vec<u8>, offset: u64) -> io::Result<()> {
-        c.prepare(Operation::PWrite(PWriteOp {
+    fn pwrite(&self, c: &mut PWriteCompletion, buf: Vec<u8>, offset: u64) -> io::Result<()> {
+        let inner = c.inner_mut();
+        inner.prepare(Operation::PWrite(PWriteOp {
             fd: self.fd.raw(),
             buf,
             offset,
         }));
-        self.state.borrow_mut().queued.push_back(NonNull::from(c));
+        queue(&self.state, inner);
         Ok(())
     }
 
-    fn fsync(&self, c: &mut Completion) -> io::Result<()> {
-        c.prepare(Operation::Fsync(FsyncOp { fd: self.fd.raw() }));
-        self.state.borrow_mut().queued.push_back(NonNull::from(c));
+    fn fsync(&self, c: &mut FsyncCompletion) -> io::Result<()> {
+        let inner = c.inner_mut();
+        inner.prepare(Operation::Fsync(FsyncOp { fd: self.fd.raw() }));
+        queue(&self.state, inner);
         Ok(())
     }
 
-    fn size(&self, c: &mut Completion) -> io::Result<()> {
-        c.prepare(Operation::Size(SizeOp { fd: self.fd.raw() }));
-        self.state.borrow_mut().queued.push_back(NonNull::from(c));
+    fn size(&self, c: &mut SizeCompletion) -> io::Result<()> {
+        let inner = c.inner_mut();
+        inner.prepare(Operation::Size(SizeOp { fd: self.fd.raw() }));
+        queue(&self.state, inner);
         Ok(())
     }
+}
+
+fn queue(state: &Rc<RefCell<IoUringState>>, c: &mut CompletionInner) {
+    state.borrow_mut().queued.push_back(NonNull::from(c));
 }
 
 impl IOSocket for IoUringSocket {
@@ -358,7 +404,7 @@ impl IOSocket for IoUringSocket {
         Ok(())
     }
 
-    fn accept(&self, c: &mut Completion) -> io::Result<()> {
+    fn accept(&self, c: &mut AcceptCompletion) -> io::Result<()> {
         let fd = match &*self.kind.borrow() {
             Some(SocketKind::Listener) => self
                 .fd
@@ -379,12 +425,13 @@ impl IOSocket for IoUringSocket {
                 ));
             }
         };
-        c.prepare(Operation::Accept(AcceptOp { fd }));
-        self.state.borrow_mut().queued.push_back(NonNull::from(c));
+        let inner = c.inner_mut();
+        inner.prepare(Operation::Accept(AcceptOp { fd }));
+        queue(&self.state, inner);
         Ok(())
     }
 
-    fn recv(&self, c: &mut Completion, len: usize) -> io::Result<()> {
+    fn recv(&self, c: &mut RecvCompletion, len: usize) -> io::Result<()> {
         let fd = self
             .fd
             .borrow()
@@ -408,16 +455,17 @@ impl IOSocket for IoUringSocket {
                 ));
             }
         }
-        c.prepare(Operation::Recv(RecvOp {
+        let inner = c.inner_mut();
+        inner.prepare(Operation::Recv(RecvOp {
             fd,
             buf: vec![0_u8; len],
             flags: libc::MSG_DONTWAIT,
         }));
-        self.state.borrow_mut().queued.push_back(NonNull::from(c));
+        queue(&self.state, inner);
         Ok(())
     }
 
-    fn send(&self, c: &mut Completion, buf: Vec<u8>) -> io::Result<()> {
+    fn send(&self, c: &mut SendCompletion, buf: Vec<u8>) -> io::Result<()> {
         let fd = self
             .fd
             .borrow()
@@ -441,12 +489,13 @@ impl IOSocket for IoUringSocket {
                 ));
             }
         }
-        c.prepare(Operation::Send(SendOp {
+        let inner = c.inner_mut();
+        inner.prepare(Operation::Send(SendOp {
             fd,
             buf,
             flags: libc::MSG_DONTWAIT | libc::MSG_NOSIGNAL,
         }));
-        self.state.borrow_mut().queued.push_back(NonNull::from(c));
+        queue(&self.state, inner);
         Ok(())
     }
 
@@ -512,12 +561,13 @@ impl IO for IoUringIO {
         }))
     }
 
-    fn mkdir(&self, c: &mut Completion, path: &Path, mode: u32) -> io::Result<()> {
-        c.prepare(Operation::Mkdir(MkdirOp {
+    fn mkdir(&self, c: &mut MkdirCompletion, path: &Path, mode: u32) -> io::Result<()> {
+        let inner = c.inner_mut();
+        inner.prepare(Operation::Mkdir(MkdirOp {
             path: c_string(path)?,
             mode,
         }));
-        self.state.borrow_mut().queued.push_back(NonNull::from(c));
+        queue(&self.state, inner);
         Ok(())
     }
 
@@ -528,8 +578,8 @@ impl IO for IoUringIO {
 
 impl IOLoop for IoUringIO {
     fn step(&self) -> io::Result<bool> {
-        let mut ready = Vec::new();
         let mut progressed = false;
+        let mut size_ops = Vec::new();
 
         {
             let mut state = self.state.borrow_mut();
@@ -547,20 +597,12 @@ impl IOLoop for IoUringIO {
                         state.queued.push_front(completion_ptr);
                         break;
                     }
-                    let result = Self::decode_result(&self.state, completion, 0);
-                    ready.push((completion_ptr, result));
+                    size_ops.push(completion_ptr);
                     progressed = true;
                     continue;
                 }
 
-                let entry = match Self::prepare_entry(completion) {
-                    Ok(entry) => entry,
-                    Err(err) => {
-                        ready.push((completion_ptr, Err(err)));
-                        progressed = true;
-                        continue;
-                    }
-                };
+                let entry = Self::prepare_entry(completion);
                 let mut submission = state.ring.submission();
                 let pushed = unsafe { submission.push(&entry).is_ok() };
                 drop(submission);
@@ -579,6 +621,12 @@ impl IOLoop for IoUringIO {
             }
         }
 
+        for completion_ptr in size_ops {
+            let completion = unsafe { completion_ptr.as_ptr().as_mut().expect("non-null") };
+            Self::dispatch_complete(&self.state, completion, 0);
+        }
+
+        let mut completed = Vec::new();
         {
             let mut state = self.state.borrow_mut();
             let len = state.ring.completion().len();
@@ -588,8 +636,8 @@ impl IOLoop for IoUringIO {
                     .completion()
                     .next()
                     .expect("completion length checked above");
-                let completion_ptr =
-                    NonNull::new(cqe.user_data() as *mut Completion).ok_or_else(|| {
+                let completion_ptr = NonNull::new(cqe.user_data() as *mut CompletionInner)
+                    .ok_or_else(|| {
                         io::Error::new(io::ErrorKind::InvalidData, "completion pointer missing")
                     })?;
                 let completion = unsafe { completion_ptr.as_ptr().as_mut().expect("non-null") };
@@ -603,15 +651,14 @@ impl IOLoop for IoUringIO {
                     progressed = true;
                     continue;
                 }
-                let result = Self::decode_result(&self.state, completion, cqe.result());
-                ready.push((completion_ptr, result));
+                completed.push((completion_ptr, cqe.result()));
                 progressed = true;
             }
         }
 
-        for (completion_ptr, result) in ready {
+        for (completion_ptr, result) in completed {
             let completion = unsafe { completion_ptr.as_ptr().as_mut().expect("non-null") };
-            completion.complete(result);
+            Self::dispatch_complete(&self.state, completion, result);
         }
 
         Ok(progressed)
@@ -626,6 +673,11 @@ pub(crate) fn c_string(path: &Path) -> io::Result<CString> {
         )
     })
 }
+
+fn io_uring_err(result: i32) -> io::Error {
+    io::Error::from_raw_os_error(-result)
+}
+
 fn socket_addr_to_raw(addr: SocketAddr) -> (libc::sockaddr_storage, libc::socklen_t) {
     match addr {
         SocketAddr::V4(addr) => {

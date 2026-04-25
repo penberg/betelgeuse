@@ -4,14 +4,16 @@
 //! - [`IOLoop`] advances a concrete backend and retires completed work
 //! - [`IO`] submits new operations and allocates backend objects
 //! - [`IOFile`] and [`IOSocket`] expose file and socket capabilities
-//! - [`Completion`] provides the caller-owned record for one in-flight operation
+//! - one concrete completion type per operation kind (e.g. [`RecvCompletion`])
+//!   provides the caller-owned record for one in-flight operation
 //!
-//! The subsystem is completion-based. A caller prepares and owns a
-//! [`Completion`] object, passes it to an operation such as [`IO::mkdir`] or
-//! [`IOSocket::recv`], and later observes a terminal [`CompletionResult`] in
-//! that same object. The backend is responsible for translating abstract
-//! operations into concrete kernel work, advancing them to completion, and
-//! recording the semantic result.
+//! The subsystem is completion-based. There is one concrete completion type
+//! per operation kind ([`RecvCompletion`], [`SendCompletion`], ...). The
+//! caller prepares and owns the matching one, passes it to the operation
+//! (e.g. [`IO::mkdir`], [`IOSocket::recv`]), and later observes the typed
+//! result in the same object. The backend translates abstract operations
+//! into concrete kernel work, advances them to completion, and writes the
+//! typed result.
 //!
 //! Separating [`IOLoop`] from [`IO`] preserves a clear distinction between
 //! driving the backend and issuing work into it. A single implementation may
@@ -31,11 +33,13 @@ pub mod op;
 pub mod slab;
 pub mod task;
 
-pub use completion::{Completion, CompletionCallback, CompletionContext, CompletionResult};
-
-pub(crate) use completion::{
-    AcceptOp, FsyncOp, MkdirOp, Operation, PReadOp, PWriteOp, RecvOp, SendOp, SizeOp,
+pub use completion::{
+    AcceptCompletion, AcceptOp, FsyncCompletion, FsyncOp, MkdirCompletion, MkdirOp,
+    PReadCompletion, PReadOp, PWriteCompletion, PWriteOp, RecvCompletion, RecvOp, SendCompletion,
+    SendOp, SizeCompletion, SizeOp,
 };
+
+pub use completion::{CompletionInner, Operation};
 
 /// Drives a concrete I/O backend forward.
 ///
@@ -56,10 +60,10 @@ pub trait IOLoop: IO {
 
 /// Submits file-system and socket operations to the backend.
 ///
-/// This interface creates backend objects and arms caller-owned
-/// [`Completion`] slots. The backend owns syscall translation, retry policy,
-/// and kernel-specific details; callers own completion lifetimes and interpret
-/// semantic [`CompletionResult`] values.
+/// This interface creates backend objects and arms caller-owned typed
+/// completion slots. The backend owns syscall translation, retry policy,
+/// and kernel-specific details; callers own completion lifetimes and observe
+/// typed results via each completion's `take_result`.
 pub trait IO {
     /// Opens a file with the requested [`OpenOptions`].
     fn open(&self, path: &Path, options: OpenOptions) -> stdio::Result<Box<dyn IOFile>>;
@@ -68,7 +72,7 @@ pub trait IO {
     fn socket(&self) -> stdio::Result<Box<dyn IOSocket>>;
 
     /// Submits a single-directory creation operation.
-    fn mkdir(&self, c: &mut Completion, path: &Path, mode: u32) -> stdio::Result<()>;
+    fn mkdir(&self, c: &mut MkdirCompletion, path: &Path, mode: u32) -> stdio::Result<()>;
 
     /// Returns a short backend name for logging and diagnostics.
     fn backend_name(&self) -> &'static str;
@@ -89,22 +93,21 @@ pub struct OpenOptions {
 
 /// Backend-agnostic file operations.
 ///
-/// A file object is a handle that submits work into caller-owned
-/// [`Completion`] slots. The backend later completes those same slots with
-/// semantic results such as [`CompletionResult::PRead`] or
-/// [`CompletionResult::Fsync`].
+/// A file object is a handle that submits work into caller-owned typed
+/// completion slots. The backend later completes those slots with the
+/// matching typed result (`Vec<u8>` for reads, `usize` for writes, etc.).
 pub trait IOFile {
     /// Reads up to `len` bytes starting at `offset`.
-    fn pread(&self, c: &mut Completion, len: usize, offset: u64) -> stdio::Result<()>;
+    fn pread(&self, c: &mut PReadCompletion, len: usize, offset: u64) -> stdio::Result<()>;
 
     /// Writes `buf` starting at `offset`.
-    fn pwrite(&self, c: &mut Completion, buf: Vec<u8>, offset: u64) -> stdio::Result<()>;
+    fn pwrite(&self, c: &mut PWriteCompletion, buf: Vec<u8>, offset: u64) -> stdio::Result<()>;
 
     /// Flushes file data to stable storage.
-    fn fsync(&self, c: &mut Completion) -> stdio::Result<()>;
+    fn fsync(&self, c: &mut FsyncCompletion) -> stdio::Result<()>;
 
     /// Reads the current file size.
-    fn size(&self, c: &mut Completion) -> stdio::Result<()>;
+    fn size(&self, c: &mut SizeCompletion) -> stdio::Result<()>;
 }
 
 /// Backend-agnostic socket operations.
@@ -117,13 +120,13 @@ pub trait IOSocket {
     fn bind(&self, addr: SocketAddr) -> stdio::Result<()>;
 
     /// Accepts one inbound connection on a listening socket.
-    fn accept(&self, c: &mut Completion) -> stdio::Result<()>;
+    fn accept(&self, c: &mut AcceptCompletion) -> stdio::Result<()>;
 
     /// Receives up to `len` bytes from a connected socket.
-    fn recv(&self, c: &mut Completion, len: usize) -> stdio::Result<()>;
+    fn recv(&self, c: &mut RecvCompletion, len: usize) -> stdio::Result<()>;
 
     /// Sends the contents of `buf` on a connected socket.
-    fn send(&self, c: &mut Completion, buf: Vec<u8>) -> stdio::Result<()>;
+    fn send(&self, c: &mut SendCompletion, buf: Vec<u8>) -> stdio::Result<()>;
 
     /// Enables or disables the `TCP_NODELAY` socket option.
     ///
@@ -171,7 +174,7 @@ impl<A> IO for IOLoopHandle<A> {
         self.inner.socket()
     }
 
-    fn mkdir(&self, c: &mut Completion, path: &Path, mode: u32) -> stdio::Result<()> {
+    fn mkdir(&self, c: &mut MkdirCompletion, path: &Path, mode: u32) -> stdio::Result<()> {
         self.inner.mkdir(c, path, mode)
     }
 
@@ -239,7 +242,7 @@ impl IO for IOHandle {
         self.io_loop.socket()
     }
 
-    fn mkdir(&self, c: &mut Completion, path: &Path, mode: u32) -> stdio::Result<()> {
+    fn mkdir(&self, c: &mut MkdirCompletion, path: &Path, mode: u32) -> stdio::Result<()> {
         self.io_loop.mkdir(c, path, mode)
     }
 

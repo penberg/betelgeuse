@@ -14,8 +14,10 @@ use std::{
 use log::trace;
 
 use crate::{
-    AcceptOp, Completion, CompletionResult, FsyncOp, IO, IOFile, IOLoop, IOSocket, MkdirOp,
-    OpenOptions, Operation, PReadOp, PWriteOp, RecvOp, SendOp, SizeOp,
+    AcceptCompletion, AcceptOp, CompletionInner, FsyncCompletion, FsyncOp, IO, IOFile, IOLoop,
+    IOSocket, MkdirCompletion, MkdirOp, OpenOptions, Operation, PReadCompletion, PReadOp,
+    PWriteCompletion, PWriteOp, RecvCompletion, RecvOp, SendCompletion, SendOp, SizeCompletion,
+    SizeOp,
 };
 
 enum SocketKind {
@@ -48,7 +50,7 @@ impl Drop for OwnedFd {
 
 struct DarwinState {
     kq: RawFd,
-    queued: VecDeque<NonNull<Completion>>,
+    queued: VecDeque<NonNull<CompletionInner>>,
 }
 
 impl Drop for DarwinState {
@@ -77,7 +79,8 @@ pub struct DarwinIO {
 enum PollResult {
     Wait,
     Retry,
-    Ready(io::Result<CompletionResult>),
+    /// Backend wrote the typed result directly into the wrapping completion.
+    Done,
 }
 
 impl DarwinIO {
@@ -163,12 +166,7 @@ impl DarwinIO {
         Ok(Rc::new(OwnedFd::new(fd)))
     }
 
-    fn queue_completion(&self, c: &mut Completion) {
-        c.mark_submitted();
-        self.state.borrow_mut().queued.push_back(NonNull::from(c));
-    }
-
-    fn watch_fd(kq: RawFd, c: NonNull<Completion>, op: &Operation) -> io::Result<()> {
+    fn watch_fd(kq: RawFd, c: NonNull<CompletionInner>, op: &Operation) -> io::Result<()> {
         let (fd, filter) = match op {
             Operation::Accept(op) => (op.fd, libc::EVFILT_READ),
             Operation::Recv(op) => (op.fd, libc::EVFILT_READ),
@@ -208,41 +206,46 @@ impl DarwinIO {
 }
 
 impl IOFile for DarwinFile {
-    fn pread(&self, c: &mut Completion, len: usize, offset: u64) -> io::Result<()> {
-        c.prepare(Operation::PRead(PReadOp {
+    fn pread(&self, c: &mut PReadCompletion, len: usize, offset: u64) -> io::Result<()> {
+        let inner = c.inner_mut();
+        inner.prepare(Operation::PRead(PReadOp {
             fd: self.fd.raw(),
             buf: vec![0_u8; len],
             offset,
         }));
-        c.mark_submitted();
-        self.state.borrow_mut().queued.push_back(NonNull::from(c));
+        queue(&self.state, inner);
         Ok(())
     }
 
-    fn pwrite(&self, c: &mut Completion, buf: Vec<u8>, offset: u64) -> io::Result<()> {
-        c.prepare(Operation::PWrite(PWriteOp {
+    fn pwrite(&self, c: &mut PWriteCompletion, buf: Vec<u8>, offset: u64) -> io::Result<()> {
+        let inner = c.inner_mut();
+        inner.prepare(Operation::PWrite(PWriteOp {
             fd: self.fd.raw(),
             buf,
             offset,
         }));
-        c.mark_submitted();
-        self.state.borrow_mut().queued.push_back(NonNull::from(c));
+        queue(&self.state, inner);
         Ok(())
     }
 
-    fn fsync(&self, c: &mut Completion) -> io::Result<()> {
-        c.prepare(Operation::Fsync(FsyncOp { fd: self.fd.raw() }));
-        c.mark_submitted();
-        self.state.borrow_mut().queued.push_back(NonNull::from(c));
+    fn fsync(&self, c: &mut FsyncCompletion) -> io::Result<()> {
+        let inner = c.inner_mut();
+        inner.prepare(Operation::Fsync(FsyncOp { fd: self.fd.raw() }));
+        queue(&self.state, inner);
         Ok(())
     }
 
-    fn size(&self, c: &mut Completion) -> io::Result<()> {
-        c.prepare(Operation::Size(SizeOp { fd: self.fd.raw() }));
-        c.mark_submitted();
-        self.state.borrow_mut().queued.push_back(NonNull::from(c));
+    fn size(&self, c: &mut SizeCompletion) -> io::Result<()> {
+        let inner = c.inner_mut();
+        inner.prepare(Operation::Size(SizeOp { fd: self.fd.raw() }));
+        queue(&self.state, inner);
         Ok(())
     }
+}
+
+fn queue(state: &Rc<RefCell<DarwinState>>, c: &mut CompletionInner) {
+    c.mark_submitted();
+    state.borrow_mut().queued.push_back(NonNull::from(c));
 }
 
 impl IOSocket for DarwinSocket {
@@ -287,7 +290,7 @@ impl IOSocket for DarwinSocket {
         Ok(())
     }
 
-    fn accept(&self, c: &mut Completion) -> io::Result<()> {
+    fn accept(&self, c: &mut AcceptCompletion) -> io::Result<()> {
         let fd = match &*self.kind.borrow() {
             Some(SocketKind::Listener) => self
                 .fd
@@ -308,13 +311,13 @@ impl IOSocket for DarwinSocket {
                 ));
             }
         };
-        c.prepare(Operation::Accept(AcceptOp { fd }));
-        c.mark_submitted();
-        self.state.borrow_mut().queued.push_back(NonNull::from(c));
+        let inner = c.inner_mut();
+        inner.prepare(Operation::Accept(AcceptOp { fd }));
+        queue(&self.state, inner);
         Ok(())
     }
 
-    fn recv(&self, c: &mut Completion, len: usize) -> io::Result<()> {
+    fn recv(&self, c: &mut RecvCompletion, len: usize) -> io::Result<()> {
         let fd = self
             .fd
             .borrow()
@@ -339,17 +342,17 @@ impl IOSocket for DarwinSocket {
             }
         }
 
-        c.prepare(Operation::Recv(RecvOp {
+        let inner = c.inner_mut();
+        inner.prepare(Operation::Recv(RecvOp {
             fd,
             buf: vec![0_u8; len],
             flags: libc::MSG_DONTWAIT,
         }));
-        c.mark_submitted();
-        self.state.borrow_mut().queued.push_back(NonNull::from(c));
+        queue(&self.state, inner);
         Ok(())
     }
 
-    fn send(&self, c: &mut Completion, buf: Vec<u8>) -> io::Result<()> {
+    fn send(&self, c: &mut SendCompletion, buf: Vec<u8>) -> io::Result<()> {
         let fd = self
             .fd
             .borrow()
@@ -374,13 +377,13 @@ impl IOSocket for DarwinSocket {
             }
         }
 
-        c.prepare(Operation::Send(SendOp {
+        let inner = c.inner_mut();
+        inner.prepare(Operation::Send(SendOp {
             fd,
             buf,
             flags: libc::MSG_DONTWAIT,
         }));
-        c.mark_submitted();
-        self.state.borrow_mut().queued.push_back(NonNull::from(c));
+        queue(&self.state, inner);
         Ok(())
     }
 
@@ -446,12 +449,13 @@ impl IO for DarwinIO {
         }))
     }
 
-    fn mkdir(&self, c: &mut Completion, path: &Path, mode: u32) -> io::Result<()> {
-        c.prepare(Operation::Mkdir(MkdirOp {
+    fn mkdir(&self, c: &mut MkdirCompletion, path: &Path, mode: u32) -> io::Result<()> {
+        let inner = c.inner_mut();
+        inner.prepare(Operation::Mkdir(MkdirOp {
             path: c_string(path)?,
             mode,
         }));
-        self.queue_completion(c);
+        queue(&self.state, inner);
         Ok(())
     }
 
@@ -462,7 +466,6 @@ impl IO for DarwinIO {
 
 impl IOLoop for DarwinIO {
     fn step(&self) -> io::Result<bool> {
-        let mut ready = Vec::new();
         let mut progressed = false;
 
         let queued_len = self.state.borrow().queued.len();
@@ -479,205 +482,272 @@ impl IOLoop for DarwinIO {
                 PollResult::Wait => {
                     let kq = self.state.borrow().kq;
                     Self::watch_fd(kq, completion_ptr, completion.operation())?;
-                    progressed = true;
                 }
                 PollResult::Retry => {
                     self.state.borrow_mut().queued.push_back(completion_ptr);
-                    progressed = true;
                 }
-                PollResult::Ready(result) => {
-                    ready.push((completion_ptr, result));
-                    progressed = true;
-                }
+                PollResult::Done => {}
             }
+            progressed = true;
         }
 
-        {
-            let kq = self.state.borrow().kq;
-            let mut events: [libc::kevent; 64] = unsafe { MaybeUninit::zeroed().assume_init() };
-            let timeout = libc::timespec {
-                tv_sec: 0,
-                tv_nsec: 0,
-            };
-            let n = unsafe {
-                libc::kevent(
-                    kq,
-                    std::ptr::null(),
-                    0,
-                    events.as_mut_ptr(),
-                    events.len() as i32,
-                    &timeout,
-                )
-            };
-            if n < 0 {
-                return Err(io::Error::last_os_error());
-            }
-            if n > 0 {
-                progressed = true;
-            }
-
-            for ev in events.iter().take(n as usize) {
-                let Some(completion_ptr) = NonNull::new(ev.udata.cast::<Completion>()) else {
-                    continue;
-                };
-
-                if (ev.flags & libc::EV_ERROR as u16) != 0 && ev.data != 0 {
-                    ready.push((
-                        completion_ptr,
-                        Err(io::Error::from_raw_os_error(ev.data as i32)),
-                    ));
-                    continue;
-                }
-
-                self.state.borrow_mut().queued.push_back(completion_ptr);
-            }
+        let kq = self.state.borrow().kq;
+        let mut events: [libc::kevent; 64] = unsafe { MaybeUninit::zeroed().assume_init() };
+        let timeout = libc::timespec {
+            tv_sec: 0,
+            tv_nsec: 0,
+        };
+        let n = unsafe {
+            libc::kevent(
+                kq,
+                std::ptr::null(),
+                0,
+                events.as_mut_ptr(),
+                events.len() as i32,
+                &timeout,
+            )
+        };
+        if n < 0 {
+            return Err(io::Error::last_os_error());
+        }
+        if n > 0 {
+            progressed = true;
         }
 
-        for (completion_ptr, result) in ready {
-            let completion = unsafe { completion_ptr.as_ptr().as_mut().expect("non-null") };
-            completion.complete(result);
+        for ev in events.iter().take(n as usize) {
+            let Some(completion_ptr) = NonNull::new(ev.udata.cast::<CompletionInner>()) else {
+                continue;
+            };
+
+            if (ev.flags & libc::EV_ERROR as u16) != 0 && ev.data != 0 {
+                let completion = unsafe { completion_ptr.as_ptr().as_mut().expect("non-null") };
+                fail_completion(completion, io::Error::from_raw_os_error(ev.data as i32));
+                continue;
+            }
+
+            self.state.borrow_mut().queued.push_back(completion_ptr);
         }
 
         Ok(progressed)
     }
 }
 
-fn execute_completion(state: &Rc<RefCell<DarwinState>>, c: &mut Completion) -> PollResult {
-    match c.operation_mut() {
-        Operation::Accept(op) => {
-            let accepted =
-                unsafe { libc::accept(op.fd, std::ptr::null_mut(), std::ptr::null_mut()) };
-            if accepted < 0 {
-                let err = io::Error::last_os_error();
-                if err.kind() == io::ErrorKind::WouldBlock {
-                    return PollResult::Wait;
-                }
-                if err.raw_os_error() == Some(libc::EINTR) {
-                    return PollResult::Retry;
-                }
-                return PollResult::Ready(Err(err));
-            }
+/// Stores the same `io::Error` into whichever typed completion the inner is
+/// the prefix of. Used for the kqueue `EV_ERROR` path, which delivers a
+/// kernel-side errno before the syscall has even run.
+fn fail_completion(c: &mut CompletionInner, err: io::Error) {
+    match c.operation() {
+        Operation::Accept(_) => unsafe { AcceptCompletion::from_inner_mut(c) }.complete(Err(err)),
+        Operation::Recv(_) => unsafe { RecvCompletion::from_inner_mut(c) }.complete(Err(err)),
+        Operation::Send(_) => unsafe { SendCompletion::from_inner_mut(c) }.complete(Err(err)),
+        Operation::PRead(_) => unsafe { PReadCompletion::from_inner_mut(c) }.complete(Err(err)),
+        Operation::PWrite(_) => unsafe { PWriteCompletion::from_inner_mut(c) }.complete(Err(err)),
+        Operation::Fsync(_) => unsafe { FsyncCompletion::from_inner_mut(c) }.complete(Err(err)),
+        Operation::Size(_) => unsafe { SizeCompletion::from_inner_mut(c) }.complete(Err(err)),
+        Operation::Mkdir(_) => unsafe { MkdirCompletion::from_inner_mut(c) }.complete(Err(err)),
+        Operation::Nop => {}
+    }
+}
 
-            if let Err(err) =
-                set_nonblocking_and_cloexec(accepted).and_then(|_| set_no_sigpipe(accepted))
-            {
-                unsafe {
-                    libc::close(accepted);
+/// Runs the syscall for the operation armed in `c` and either parks the
+/// completion (`Wait`/`Retry`) or stores the typed result directly into the
+/// wrapping typed completion.
+///
+/// SAFETY in each `Done` arm: `c` is the inner of the typed completion that
+/// armed the matching `Operation` variant. The IO methods that arm a slot
+/// take `&mut <kind>Completion` and only set the matching `Operation`, so
+/// the cast back is sound.
+fn execute_completion(state: &Rc<RefCell<DarwinState>>, c: &mut CompletionInner) -> PollResult {
+    match c.operation() {
+        Operation::Accept(_) => {
+            let result = {
+                let Operation::Accept(op) = c.operation_mut() else {
+                    unreachable!()
+                };
+                let accepted =
+                    unsafe { libc::accept(op.fd, std::ptr::null_mut(), std::ptr::null_mut()) };
+                if accepted < 0 {
+                    let err = io::Error::last_os_error();
+                    if err.kind() == io::ErrorKind::WouldBlock {
+                        return PollResult::Wait;
+                    }
+                    if err.raw_os_error() == Some(libc::EINTR) {
+                        return PollResult::Retry;
+                    }
+                    Err(err)
+                } else if let Err(err) =
+                    set_nonblocking_and_cloexec(accepted).and_then(|_| set_no_sigpipe(accepted))
+                {
+                    unsafe {
+                        libc::close(accepted);
+                    }
+                    Err(err)
+                } else {
+                    Ok(Box::new(DarwinSocket {
+                        state: state.clone(),
+                        fd: Rc::new(RefCell::new(Some(Rc::new(OwnedFd::new(accepted))))),
+                        kind: Rc::new(RefCell::new(Some(SocketKind::Stream))),
+                    }) as Box<dyn IOSocket>)
                 }
-                return PollResult::Ready(Err(err));
-            }
-
-            PollResult::Ready(Ok(CompletionResult::Accept(Box::new(DarwinSocket {
-                state: state.clone(),
-                fd: Rc::new(RefCell::new(Some(Rc::new(OwnedFd::new(accepted))))),
-                kind: Rc::new(RefCell::new(Some(SocketKind::Stream))),
-            }))))
-        }
-        Operation::Recv(op) => {
-            let rc =
-                unsafe { libc::recv(op.fd, op.buf.as_mut_ptr().cast(), op.buf.len(), op.flags) };
-            if rc < 0 {
-                let err = io::Error::last_os_error();
-                if err.kind() == io::ErrorKind::WouldBlock {
-                    return PollResult::Wait;
-                }
-                if err.raw_os_error() == Some(libc::EINTR) {
-                    return PollResult::Retry;
-                }
-                return PollResult::Ready(Err(err));
-            }
-            op.buf.truncate(rc as usize);
-            PollResult::Ready(Ok(CompletionResult::Recv(mem::take(&mut op.buf))))
-        }
-        Operation::Send(op) => {
-            let rc = unsafe { libc::send(op.fd, op.buf.as_ptr().cast(), op.buf.len(), op.flags) };
-            if rc < 0 {
-                let err = io::Error::last_os_error();
-                if err.kind() == io::ErrorKind::WouldBlock {
-                    return PollResult::Wait;
-                }
-                if err.raw_os_error() == Some(libc::EINTR) {
-                    return PollResult::Retry;
-                }
-                return PollResult::Ready(Err(err));
-            }
-            PollResult::Ready(Ok(CompletionResult::Send(rc as usize)))
-        }
-        Operation::PRead(op) => {
-            let rc = unsafe {
-                libc::pread(
-                    op.fd,
-                    op.buf.as_mut_ptr().cast(),
-                    op.buf.len(),
-                    op.offset as libc::off_t,
-                )
             };
-            if rc < 0 {
-                let err = io::Error::last_os_error();
-                if err.raw_os_error() == Some(libc::EINTR) {
-                    return PollResult::Retry;
-                }
-                return PollResult::Ready(Err(err));
-            }
-            op.buf.truncate(rc as usize);
-            PollResult::Ready(Ok(CompletionResult::PRead(mem::take(&mut op.buf))))
+            unsafe { AcceptCompletion::from_inner_mut(c) }.complete(result);
+            PollResult::Done
         }
-        Operation::PWrite(op) => {
-            let rc = unsafe {
-                libc::pwrite(
-                    op.fd,
-                    op.buf.as_ptr().cast(),
-                    op.buf.len(),
-                    op.offset as libc::off_t,
-                )
+        Operation::Recv(_) => {
+            let result = {
+                let Operation::Recv(op) = c.operation_mut() else {
+                    unreachable!()
+                };
+                let rc = unsafe {
+                    libc::recv(op.fd, op.buf.as_mut_ptr().cast(), op.buf.len(), op.flags)
+                };
+                if rc < 0 {
+                    let err = io::Error::last_os_error();
+                    if err.kind() == io::ErrorKind::WouldBlock {
+                        return PollResult::Wait;
+                    }
+                    if err.raw_os_error() == Some(libc::EINTR) {
+                        return PollResult::Retry;
+                    }
+                    Err(err)
+                } else {
+                    op.buf.truncate(rc as usize);
+                    Ok(mem::take(&mut op.buf))
+                }
             };
-            if rc < 0 {
-                let err = io::Error::last_os_error();
-                if err.raw_os_error() == Some(libc::EINTR) {
-                    return PollResult::Retry;
-                }
-                return PollResult::Ready(Err(err));
-            }
-            PollResult::Ready(Ok(CompletionResult::PWrite(rc as usize)))
+            unsafe { RecvCompletion::from_inner_mut(c) }.complete(result);
+            PollResult::Done
         }
-        Operation::Fsync(op) => {
-            let rc = unsafe { libc::fsync(op.fd) };
-            if rc < 0 {
-                let err = io::Error::last_os_error();
-                if err.raw_os_error() == Some(libc::EINTR) {
-                    return PollResult::Retry;
+        Operation::Send(_) => {
+            let result = {
+                let Operation::Send(op) = c.operation_mut() else {
+                    unreachable!()
+                };
+                let rc =
+                    unsafe { libc::send(op.fd, op.buf.as_ptr().cast(), op.buf.len(), op.flags) };
+                if rc < 0 {
+                    let err = io::Error::last_os_error();
+                    if err.kind() == io::ErrorKind::WouldBlock {
+                        return PollResult::Wait;
+                    }
+                    if err.raw_os_error() == Some(libc::EINTR) {
+                        return PollResult::Retry;
+                    }
+                    Err(err)
+                } else {
+                    Ok(rc as usize)
                 }
-                return PollResult::Ready(Err(err));
-            }
-            PollResult::Ready(Ok(CompletionResult::Fsync))
+            };
+            unsafe { SendCompletion::from_inner_mut(c) }.complete(result);
+            PollResult::Done
         }
-        Operation::Size(op) => {
-            let mut stat = MaybeUninit::<libc::stat>::uninit();
-            match unsafe { libc::fstat(op.fd, stat.as_mut_ptr()) } {
-                0 => {
-                    let stat = unsafe { stat.assume_init() };
-                    PollResult::Ready(Ok(CompletionResult::Size(stat.st_size as u64)))
-                }
-                _ => PollResult::Ready(Err(io::Error::last_os_error())),
-            }
-        }
-        Operation::Mkdir(op) => {
-            match unsafe { libc::mkdir(op.path.as_ptr(), op.mode as libc::mode_t) } {
-                0 => PollResult::Ready(Ok(CompletionResult::Mkdir)),
-                _ => {
+        Operation::PRead(_) => {
+            let result = {
+                let Operation::PRead(op) = c.operation_mut() else {
+                    unreachable!()
+                };
+                let rc = unsafe {
+                    libc::pread(
+                        op.fd,
+                        op.buf.as_mut_ptr().cast(),
+                        op.buf.len(),
+                        op.offset as libc::off_t,
+                    )
+                };
+                if rc < 0 {
                     let err = io::Error::last_os_error();
                     if err.raw_os_error() == Some(libc::EINTR) {
-                        PollResult::Retry
-                    } else {
-                        PollResult::Ready(Err(err))
+                        return PollResult::Retry;
                     }
+                    Err(err)
+                } else {
+                    op.buf.truncate(rc as usize);
+                    Ok(mem::take(&mut op.buf))
                 }
-            }
+            };
+            unsafe { PReadCompletion::from_inner_mut(c) }.complete(result);
+            PollResult::Done
         }
-        Operation::Nop => PollResult::Ready(Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "completion has no operation",
-        ))),
+        Operation::PWrite(_) => {
+            let result = {
+                let Operation::PWrite(op) = c.operation_mut() else {
+                    unreachable!()
+                };
+                let rc = unsafe {
+                    libc::pwrite(
+                        op.fd,
+                        op.buf.as_ptr().cast(),
+                        op.buf.len(),
+                        op.offset as libc::off_t,
+                    )
+                };
+                if rc < 0 {
+                    let err = io::Error::last_os_error();
+                    if err.raw_os_error() == Some(libc::EINTR) {
+                        return PollResult::Retry;
+                    }
+                    Err(err)
+                } else {
+                    Ok(rc as usize)
+                }
+            };
+            unsafe { PWriteCompletion::from_inner_mut(c) }.complete(result);
+            PollResult::Done
+        }
+        Operation::Fsync(_) => {
+            let result = {
+                let Operation::Fsync(op) = c.operation_mut() else {
+                    unreachable!()
+                };
+                let rc = unsafe { libc::fsync(op.fd) };
+                if rc < 0 {
+                    let err = io::Error::last_os_error();
+                    if err.raw_os_error() == Some(libc::EINTR) {
+                        return PollResult::Retry;
+                    }
+                    Err(err)
+                } else {
+                    Ok(())
+                }
+            };
+            unsafe { FsyncCompletion::from_inner_mut(c) }.complete(result);
+            PollResult::Done
+        }
+        Operation::Size(_) => {
+            let result = {
+                let Operation::Size(op) = c.operation_mut() else {
+                    unreachable!()
+                };
+                let mut stat = MaybeUninit::<libc::stat>::uninit();
+                if unsafe { libc::fstat(op.fd, stat.as_mut_ptr()) } == 0 {
+                    let stat = unsafe { stat.assume_init() };
+                    Ok(stat.st_size as u64)
+                } else {
+                    Err(io::Error::last_os_error())
+                }
+            };
+            unsafe { SizeCompletion::from_inner_mut(c) }.complete(result);
+            PollResult::Done
+        }
+        Operation::Mkdir(_) => {
+            let result = {
+                let Operation::Mkdir(op) = c.operation_mut() else {
+                    unreachable!()
+                };
+                if unsafe { libc::mkdir(op.path.as_ptr(), op.mode as libc::mode_t) } == 0 {
+                    Ok(())
+                } else {
+                    let err = io::Error::last_os_error();
+                    if err.raw_os_error() == Some(libc::EINTR) {
+                        return PollResult::Retry;
+                    }
+                    Err(err)
+                }
+            };
+            unsafe { MkdirCompletion::from_inner_mut(c) }.complete(result);
+            PollResult::Done
+        }
+        Operation::Nop => PollResult::Done,
     }
 }
 

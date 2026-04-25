@@ -28,7 +28,7 @@ use std::{
     net::SocketAddr,
 };
 
-use betelgeuse::{CompletionResult, IO, IOHandle, IOLoop, IOSocket, io_loop, slab::Slab};
+use betelgeuse::{IO, IOHandle, IOLoop, IOSocket, io_loop, slab::Slab};
 
 use connection::Connection;
 use listener::Listener;
@@ -124,18 +124,9 @@ impl<A: Allocator + Clone> Server<A> {
 
     fn handle_accept(&mut self, idx: usize) -> io::Result<()> {
         let listener = self.listeners.entry_mut(idx).expect("valid slot");
-        let result = listener
+        let socket = listener
             .take_accept_result()
-            .expect("accept step requires completion result");
-        let socket = match result? {
-            CompletionResult::Accept(socket) => socket,
-            _ => {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidData,
-                    "listener accept completion had wrong type",
-                ));
-            }
-        };
+            .expect("accept step requires completion result")?;
         listener.arm_accept()?;
         self.insert_connection(socket)
     }
@@ -160,18 +151,9 @@ impl<A: Allocator + Clone> Server<A> {
 
     fn handle_recv(&mut self, idx: usize) -> io::Result<()> {
         let conn = self.connections.entry_mut(idx).expect("valid slot");
-        let result = conn
+        let buf = conn
             .take_recv_result()
-            .expect("recv step requires completion result");
-        let buf = match result? {
-            CompletionResult::Recv(buf) => buf,
-            _ => {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidData,
-                    "connection recv completion had wrong type",
-                ));
-            }
-        };
+            .expect("recv step requires completion result")?;
         if buf.is_empty() {
             self.connections.release(idx);
             return Ok(());
@@ -183,18 +165,9 @@ impl<A: Allocator + Clone> Server<A> {
 
     fn handle_send(&mut self, idx: usize) -> io::Result<()> {
         let conn = self.connections.entry_mut(idx).expect("valid slot");
-        let result = conn
+        let written = conn
             .take_send_result()
-            .expect("send step requires completion result");
-        let written = match result? {
-            CompletionResult::Send(n) => n,
-            _ => {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidData,
-                    "connection send completion had wrong type",
-                ));
-            }
-        };
+            .expect("send step requires completion result")?;
         if written == 0 {
             self.connections.release(idx);
             return Ok(());

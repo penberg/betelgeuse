@@ -1,6 +1,6 @@
 use std::{collections::HashMap, io};
 
-use betelgeuse::{Completion, CompletionResult, IOSocket, slab::SlabEntry};
+use betelgeuse::{IOSocket, RecvCompletion, SendCompletion, slab::SlabEntry};
 
 pub const READ_CHUNK: usize = 8192;
 pub const VERSION: &str = "betelgeuse-memcached 0.1";
@@ -14,16 +14,16 @@ enum ConnectionState {
 pub struct Connection {
     state: ConnectionState,
     pub proto: ProtocolState,
-    recv_completion: Completion,
-    send_completion: Completion,
+    recv_completion: RecvCompletion,
+    send_completion: SendCompletion,
 }
 
 impl Connection {
     pub fn open(&mut self, socket: Box<dyn IOSocket>) -> io::Result<()> {
         self.state = ConnectionState::Open { socket };
         self.proto = ProtocolState::default();
-        self.recv_completion = Completion::new();
-        self.send_completion = Completion::new();
+        self.recv_completion = RecvCompletion::new();
+        self.send_completion = SendCompletion::new();
         self.arm_recv()
     }
 
@@ -35,11 +35,11 @@ impl Connection {
         matches!(self.state, ConnectionState::Open { .. }) && self.send_completion.has_result()
     }
 
-    pub fn take_recv_result(&mut self) -> Option<io::Result<CompletionResult>> {
+    pub fn take_recv_result(&mut self) -> Option<io::Result<Vec<u8>>> {
         self.recv_completion.take_result()
     }
 
-    pub fn take_send_result(&mut self) -> Option<io::Result<CompletionResult>> {
+    pub fn take_send_result(&mut self) -> Option<io::Result<usize>> {
         self.send_completion.take_result()
     }
 
@@ -66,8 +66,8 @@ impl SlabEntry for Connection {
         Self {
             state: ConnectionState::Free { next },
             proto: ProtocolState::default(),
-            recv_completion: Completion::new(),
-            send_completion: Completion::new(),
+            recv_completion: RecvCompletion::new(),
+            send_completion: SendCompletion::new(),
         }
     }
 
@@ -89,8 +89,8 @@ impl SlabEntry for Connection {
             socket.close();
         }
         self.proto = ProtocolState::default();
-        self.recv_completion = Completion::new();
-        self.send_completion = Completion::new();
+        self.recv_completion = RecvCompletion::new();
+        self.send_completion = SendCompletion::new();
     }
 }
 

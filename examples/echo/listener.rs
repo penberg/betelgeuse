@@ -1,6 +1,6 @@
 use std::io;
 
-use betelgeuse::{Completion, CompletionResult, IOSocket, slab::SlabEntry};
+use betelgeuse::{AcceptCompletion, IOSocket, slab::SlabEntry};
 
 enum ListenerState {
     Free { next: Option<usize> },
@@ -9,13 +9,13 @@ enum ListenerState {
 
 pub struct Listener {
     state: ListenerState,
-    accept_completion: Completion,
+    accept_completion: AcceptCompletion,
 }
 
 impl Listener {
     pub fn activate(&mut self, socket: Box<dyn IOSocket>) -> io::Result<()> {
         self.state = ListenerState::Active { socket };
-        self.accept_completion = Completion::new();
+        self.accept_completion = AcceptCompletion::new();
         self.arm_accept()
     }
 
@@ -23,7 +23,7 @@ impl Listener {
         !matches!(self.state, ListenerState::Free { .. }) && self.accept_completion.has_result()
     }
 
-    pub fn take_accept_result(&mut self) -> Option<io::Result<CompletionResult>> {
+    pub fn take_accept_result(&mut self) -> Option<io::Result<Box<dyn IOSocket>>> {
         self.accept_completion.take_result()
     }
 
@@ -39,7 +39,7 @@ impl SlabEntry for Listener {
     fn new_free(next: Option<usize>) -> Self {
         Self {
             state: ListenerState::Free { next },
-            accept_completion: Completion::new(),
+            accept_completion: AcceptCompletion::new(),
         }
     }
 
@@ -60,6 +60,6 @@ impl SlabEntry for Listener {
         {
             socket.close();
         }
-        self.accept_completion = Completion::new();
+        self.accept_completion = AcceptCompletion::new();
     }
 }
