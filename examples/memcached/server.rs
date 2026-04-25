@@ -41,19 +41,13 @@ impl<A: Allocator + Clone> Server<A> {
             .activate(socket)
     }
 
-    pub fn step(&mut self) -> io::Result<bool> {
-        let mut progressed = false;
-
+    pub fn step(&mut self) -> io::Result<()> {
         for idx in 0..self.listeners.capacity() {
             let Some(listener) = self.listeners.entry_mut(idx) else {
                 continue;
             };
-            match listener.step()? {
-                ListenerStep::Idle => {}
-                ListenerStep::Accepted(socket) => {
-                    progressed = true;
-                    self.insert_connection(socket)?;
-                }
+            if let ListenerStep::Accepted(socket) = listener.step()? {
+                self.insert_connection(socket)?;
             }
         }
 
@@ -62,16 +56,12 @@ impl<A: Allocator + Clone> Server<A> {
                 continue;
             };
             match conn.step(&mut self.store)? {
-                ConnectionStep::Idle => {}
-                ConnectionStep::Progressed => progressed = true,
-                ConnectionStep::Close => {
-                    progressed = true;
-                    self.connections.release(idx);
-                }
+                ConnectionStep::Idle | ConnectionStep::Progressed => {}
+                ConnectionStep::Close => self.connections.release(idx),
             }
         }
 
-        Ok(progressed)
+        Ok(())
     }
 
     fn insert_connection(&mut self, socket: Box<dyn IOSocket>) -> io::Result<()> {
