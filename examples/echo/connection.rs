@@ -1,6 +1,6 @@
 use std::io;
 
-use betelgeuse::{Completion, CompletionResult, IOSocket, slab::SlabEntry};
+use betelgeuse::{IOSocket, RecvCompletion, SendCompletion, slab::SlabEntry};
 
 pub const READ_CHUNK: usize = 8192;
 
@@ -13,8 +13,8 @@ pub struct Connection {
     state: ConnectionState,
     pub write_buf: Vec<u8>,
     pub write_offset: usize,
-    recv_completion: Completion,
-    send_completion: Completion,
+    recv_completion: RecvCompletion,
+    send_completion: SendCompletion,
 }
 
 impl Connection {
@@ -22,8 +22,8 @@ impl Connection {
         self.state = ConnectionState::Open { socket };
         self.write_buf.clear();
         self.write_offset = 0;
-        self.recv_completion = Completion::new();
-        self.send_completion = Completion::new();
+        self.recv_completion = RecvCompletion::new();
+        self.send_completion = SendCompletion::new();
         self.arm_recv()
     }
 
@@ -35,11 +35,11 @@ impl Connection {
         matches!(self.state, ConnectionState::Open { .. }) && self.send_completion.has_result()
     }
 
-    pub fn take_recv_result(&mut self) -> Option<io::Result<CompletionResult>> {
+    pub fn take_recv_result(&mut self) -> Option<io::Result<Vec<u8>>> {
         self.recv_completion.take_result()
     }
 
-    pub fn take_send_result(&mut self) -> Option<io::Result<CompletionResult>> {
+    pub fn take_send_result(&mut self) -> Option<io::Result<usize>> {
         self.send_completion.take_result()
     }
 
@@ -67,8 +67,8 @@ impl SlabEntry for Connection {
             state: ConnectionState::Free { next },
             write_buf: Vec::with_capacity(READ_CHUNK),
             write_offset: 0,
-            recv_completion: Completion::new(),
-            send_completion: Completion::new(),
+            recv_completion: RecvCompletion::new(),
+            send_completion: SendCompletion::new(),
         }
     }
 
@@ -91,7 +91,7 @@ impl SlabEntry for Connection {
         }
         self.write_buf.clear();
         self.write_offset = 0;
-        self.recv_completion = Completion::new();
-        self.send_completion = Completion::new();
+        self.recv_completion = RecvCompletion::new();
+        self.send_completion = SendCompletion::new();
     }
 }
