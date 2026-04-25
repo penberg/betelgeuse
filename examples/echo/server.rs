@@ -10,8 +10,8 @@ const MAX_CONNECTIONS: usize = 1024;
 
 pub struct Server<A: Allocator + Clone> {
     io: IOHandle,
-    listeners: Slab<Listener, A>,
-    connections: Slab<Connection, A>,
+    listeners: Slab<A, Listener>,
+    connections: Slab<A, Connection>,
 }
 
 impl<A: Allocator + Clone> Server<A> {

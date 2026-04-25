@@ -8,12 +8,12 @@
 use std::alloc::Allocator;
 
 /// Fixed-capacity object slab backed by an intrusive free list.
-pub struct Slab<T, A: Allocator> {
+pub struct Slab<A: Allocator, T> {
     pub(crate) entries: Box<[T], A>,
     free_head: Option<usize>,
 }
 
-impl<T: SlabEntry, A: Allocator> Slab<T, A> {
+impl<A: Allocator, T: SlabEntry> Slab<A, T> {
     /// Constructs a slab with `capacity` entries.
     pub fn new(allocator: A, capacity: usize) -> Self {
         let mut entries = Vec::with_capacity_in(capacity, allocator);
@@ -137,7 +137,7 @@ mod tests {
     proptest! {
         #[test]
         fn acquire_exhausts_capacity_without_duplicates(capacity in 0usize..128) {
-            let mut slab = Slab::<TestEntry, Global>::new(Global, capacity);
+            let mut slab = Slab::<Global, TestEntry>::new(Global, capacity);
             let mut acquired = BTreeSet::new();
 
             for _ in 0..capacity {
@@ -153,7 +153,7 @@ mod tests {
 
         #[test]
         fn released_entries_are_reused_from_the_free_list(capacity in 1usize..128) {
-            let mut slab = Slab::<TestEntry, Global>::new(Global, capacity);
+            let mut slab = Slab::<Global, TestEntry>::new(Global, capacity);
             let mut acquired = Vec::new();
 
             for _ in 0..capacity {
@@ -180,7 +180,7 @@ mod tests {
             capacity in 0usize..64,
             operations in prop::collection::vec(any::<bool>(), 0..512),
         ) {
-            let mut slab = Slab::<TestEntry, Global>::new(Global, capacity);
+            let mut slab = Slab::<Global, TestEntry>::new(Global, capacity);
             let mut occupied = BTreeSet::new();
 
             assert_invariants(&slab, &occupied);
@@ -209,7 +209,7 @@ mod tests {
         }
     }
 
-    fn assert_invariants(slab: &Slab<TestEntry, Global>, occupied: &BTreeSet<usize>) {
+    fn assert_invariants(slab: &Slab<Global, TestEntry>, occupied: &BTreeSet<usize>) {
         let capacity = slab.capacity();
         let mut free = BTreeSet::new();
         let mut cursor = slab.free_head;

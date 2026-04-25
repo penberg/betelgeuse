@@ -164,7 +164,7 @@ The benefits stack up:
 
 ### The `Slab` type
 
-Betelgeuse ships one concrete implementation of this pattern: `Slab<T, A>`.
+Betelgeuse ships one concrete implementation of this pattern: `Slab<A, T>`.
 It owns a `Box<[T], A>` of user-defined entries and an intrusive free list
 over the unused ones. The backing array is allocated once at construction
 and is never resized.
@@ -172,7 +172,7 @@ and is never resized.
 ```rust
 use betelgeuse::slab::{Slab, SlabEntry};
 
-let mut connections: Slab<Connection, Global> = Slab::new(Global, 1024);
+let mut connections: Slab<Global, Connection> = Slab::new(Global, 1024);
 ```
 
 The free list is intrusive: free entries carry the `Option<usize>` link to
