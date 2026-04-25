@@ -55,9 +55,8 @@ impl<A: Allocator + Clone> Server<A> {
             let Some(conn) = self.connections.entry_mut(idx) else {
                 continue;
             };
-            match conn.step(&mut self.store)? {
-                ConnectionStep::Idle | ConnectionStep::Progressed => {}
-                ConnectionStep::Close => self.connections.release(idx),
+            if let ConnectionStep::Close = conn.step(&mut self.store)? {
+                self.connections.release(idx);
             }
         }
 
