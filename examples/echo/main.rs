@@ -4,7 +4,8 @@
 //!
 //! - one fixed-capacity `Slab` of listener slots,
 //! - one fixed-capacity `Slab` of connection slots,
-//! - a `Server::step` that drains ready completions and advances each slot,
+//! - a `Server::step` that walks every slot and lets each one advance its own
+//!   state machine via `Listener::step` / `Connection::step`,
 //! - the outer loop alternates `io.step()` (drive the backend) with
 //!   `server.step()` (react to completions).
 //!
@@ -30,8 +31,8 @@ use std::{
 
 use betelgeuse::{IO, IOHandle, IOLoop, IOSocket, io_loop, slab::Slab};
 
-use connection::Connection;
-use listener::Listener;
+use connection::{Connection, ConnectionStep};
+use listener::{Listener, ListenerStep};
 
 const ADDR: &str = "127.0.0.1:5555";
 const MAX_LISTENERS: usize = 4;
@@ -90,45 +91,33 @@ impl<A: Allocator + Clone> Server<A> {
         let mut progressed = false;
 
         for idx in 0..self.listeners.capacity() {
-            if self
-                .listeners
-                .entry_mut(idx)
-                .is_some_and(|s| s.accept_result_ready())
-            {
-                progressed = true;
-                self.handle_accept(idx)?;
+            let Some(listener) = self.listeners.entry_mut(idx) else {
+                continue;
+            };
+            match listener.step()? {
+                ListenerStep::Idle => {}
+                ListenerStep::Accepted(socket) => {
+                    progressed = true;
+                    self.insert_connection(socket)?;
+                }
             }
         }
 
         for idx in 0..self.connections.capacity() {
-            if self
-                .connections
-                .entry_mut(idx)
-                .is_some_and(|s| s.recv_result_ready())
-            {
-                progressed = true;
-                self.handle_recv(idx)?;
-            }
-            if self
-                .connections
-                .entry_mut(idx)
-                .is_some_and(|s| s.send_result_ready())
-            {
-                progressed = true;
-                self.handle_send(idx)?;
+            let Some(conn) = self.connections.entry_mut(idx) else {
+                continue;
+            };
+            match conn.step()? {
+                ConnectionStep::Idle => {}
+                ConnectionStep::Progressed => progressed = true,
+                ConnectionStep::Close => {
+                    progressed = true;
+                    self.connections.release(idx);
+                }
             }
         }
 
         Ok(progressed)
-    }
-
-    fn handle_accept(&mut self, idx: usize) -> io::Result<()> {
-        let listener = self.listeners.entry_mut(idx).expect("valid slot");
-        let socket = listener
-            .take_accept_result()
-            .expect("accept step requires completion result")?;
-        listener.arm_accept()?;
-        self.insert_connection(socket)
     }
 
     fn insert_connection(&mut self, socket: Box<dyn IOSocket>) -> io::Result<()> {
@@ -147,38 +136,5 @@ impl<A: Allocator + Clone> Server<A> {
             return Err(err);
         }
         Ok(())
-    }
-
-    fn handle_recv(&mut self, idx: usize) -> io::Result<()> {
-        let conn = self.connections.entry_mut(idx).expect("valid slot");
-        let buf = conn
-            .take_recv_result()
-            .expect("recv step requires completion result")?;
-        if buf.is_empty() {
-            self.connections.release(idx);
-            return Ok(());
-        }
-        conn.write_buf = buf;
-        conn.write_offset = 0;
-        conn.arm_send()
-    }
-
-    fn handle_send(&mut self, idx: usize) -> io::Result<()> {
-        let conn = self.connections.entry_mut(idx).expect("valid slot");
-        let written = conn
-            .take_send_result()
-            .expect("send step requires completion result")?;
-        if written == 0 {
-            self.connections.release(idx);
-            return Ok(());
-        }
-        conn.write_offset += written;
-        if conn.write_offset < conn.write_buf.len() {
-            conn.arm_send()
-        } else {
-            conn.write_buf.clear();
-            conn.write_offset = 0;
-            conn.arm_recv()
-        }
     }
 }

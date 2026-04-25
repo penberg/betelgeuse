@@ -6,58 +6,159 @@ pub const READ_CHUNK: usize = 8192;
 pub const VERSION: &str = "betelgeuse-memcached 0.1";
 pub const CRLF: &[u8] = b"\r\n";
 
+/// Outcome of advancing a connection's state machine for one tick.
+pub enum ConnectionStep {
+    /// Nothing was ready; the slot stays where it is.
+    Idle,
+    /// The state machine advanced and the slot is still alive.
+    Progressed,
+    /// The peer hung up, sent zero, or the protocol asked to close.
+    Close,
+}
+
 enum ConnectionState {
-    Free { next: Option<usize> },
-    Open { socket: Box<dyn IOSocket> },
+    Free {
+        next: Option<usize>,
+    },
+    Open {
+        socket: Box<dyn IOSocket>,
+        phase: Phase,
+    },
+}
+
+/// Which I/O direction the connection is currently waiting on.
+enum Phase {
+    Receiving,
+    Sending,
 }
 
 pub struct Connection {
     state: ConnectionState,
-    pub proto: ProtocolState,
+    proto: ProtocolState,
     recv_completion: RecvCompletion,
     send_completion: SendCompletion,
 }
 
 impl Connection {
     pub fn open(&mut self, socket: Box<dyn IOSocket>) -> io::Result<()> {
-        self.state = ConnectionState::Open { socket };
+        self.state = ConnectionState::Open {
+            socket,
+            phase: Phase::Receiving,
+        };
         self.proto = ProtocolState::default();
         self.recv_completion = RecvCompletion::new();
         self.send_completion = SendCompletion::new();
         self.arm_recv()
     }
 
-    pub fn recv_result_ready(&self) -> bool {
-        matches!(self.state, ConnectionState::Open { .. }) && self.recv_completion.has_result()
+    pub fn step(&mut self, store: &mut HashMap<Vec<u8>, Item>) -> io::Result<ConnectionStep> {
+        match &self.state {
+            ConnectionState::Open {
+                phase: Phase::Receiving,
+                ..
+            } if self.recv_completion.has_result() => self.complete_recv(store),
+            ConnectionState::Open {
+                phase: Phase::Sending,
+                ..
+            } if self.send_completion.has_result() => self.complete_send(),
+            _ => Ok(ConnectionStep::Idle),
+        }
     }
 
-    pub fn send_result_ready(&self) -> bool {
-        matches!(self.state, ConnectionState::Open { .. }) && self.send_completion.has_result()
+    fn complete_recv(&mut self, store: &mut HashMap<Vec<u8>, Item>) -> io::Result<ConnectionStep> {
+        let buf = match self
+            .recv_completion
+            .take_result()
+            .expect("step() guarantees a recv result is ready")
+        {
+            Ok(buf) => buf,
+            Err(err) if is_peer_disconnect(&err) => return Ok(ConnectionStep::Close),
+            Err(err) => return Err(err),
+        };
+        if buf.is_empty() {
+            return Ok(ConnectionStep::Close);
+        }
+
+        self.proto.read_buf.extend_from_slice(&buf);
+        self.proto.process_input(store);
+
+        if self.proto.has_pending_output() {
+            classify(self.transition_to_sending())
+        } else if self.proto.close_after_write {
+            Ok(ConnectionStep::Close)
+        } else {
+            classify(self.arm_recv())
+        }
     }
 
-    pub fn take_recv_result(&mut self) -> Option<io::Result<Vec<u8>>> {
-        self.recv_completion.take_result()
+    fn complete_send(&mut self) -> io::Result<ConnectionStep> {
+        let written = match self
+            .send_completion
+            .take_result()
+            .expect("step() guarantees a send result is ready")
+        {
+            Ok(n) => n,
+            Err(err) if is_peer_disconnect(&err) => return Ok(ConnectionStep::Close),
+            Err(err) => return Err(err),
+        };
+        if written == 0 {
+            return Ok(ConnectionStep::Close);
+        }
+
+        self.proto.write_offset += written;
+        if self.proto.write_offset < self.proto.write_buf.len() {
+            return classify(self.arm_send());
+        }
+
+        self.proto.finish_write();
+        if self.proto.close_after_write {
+            Ok(ConnectionStep::Close)
+        } else if self.proto.has_pending_output() {
+            classify(self.arm_send())
+        } else {
+            classify(self.transition_to_receiving())
+        }
     }
 
-    pub fn take_send_result(&mut self) -> Option<io::Result<usize>> {
-        self.send_completion.take_result()
+    fn transition_to_sending(&mut self) -> io::Result<()> {
+        let ConnectionState::Open { phase, .. } = &mut self.state else {
+            unreachable!("transitions only run while Open");
+        };
+        *phase = Phase::Sending;
+        self.arm_send()
     }
 
-    pub fn arm_recv(&mut self) -> io::Result<()> {
-        let ConnectionState::Open { socket } = &self.state else {
-            panic!("connection slot requires open socket");
+    fn transition_to_receiving(&mut self) -> io::Result<()> {
+        let ConnectionState::Open { phase, .. } = &mut self.state else {
+            unreachable!("transitions only run while Open");
+        };
+        *phase = Phase::Receiving;
+        self.arm_recv()
+    }
+
+    fn arm_recv(&mut self) -> io::Result<()> {
+        let ConnectionState::Open { socket, .. } = &self.state else {
+            panic!("connection requires an open socket");
         };
         socket.recv(&mut self.recv_completion, READ_CHUNK)
     }
 
-    pub fn arm_send(&mut self) -> io::Result<()> {
-        let ConnectionState::Open { socket } = &self.state else {
-            panic!("connection slot requires open socket");
+    fn arm_send(&mut self) -> io::Result<()> {
+        let ConnectionState::Open { socket, .. } = &self.state else {
+            panic!("connection requires an open socket");
         };
         socket.send(
             &mut self.send_completion,
             self.proto.write_buf[self.proto.write_offset..].to_vec(),
         )
+    }
+}
+
+fn classify(result: io::Result<()>) -> io::Result<ConnectionStep> {
+    match result {
+        Ok(()) => Ok(ConnectionStep::Progressed),
+        Err(err) if is_peer_disconnect(&err) => Ok(ConnectionStep::Close),
+        Err(err) => Err(err),
     }
 }
 
@@ -83,7 +184,7 @@ impl SlabEntry for Connection {
     }
 
     fn release(&mut self, next: Option<usize>) {
-        if let ConnectionState::Open { socket } =
+        if let ConnectionState::Open { socket, .. } =
             std::mem::replace(&mut self.state, ConnectionState::Free { next })
         {
             socket.close();

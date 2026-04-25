@@ -2,6 +2,14 @@ use std::io;
 
 use betelgeuse::{AcceptCompletion, IOSocket, slab::SlabEntry};
 
+/// Outcome of advancing a listener's state machine for one tick.
+pub enum ListenerStep {
+    /// No accept has completed yet.
+    Idle,
+    /// A new socket is ready for the owner to install in the connection slab.
+    Accepted(Box<dyn IOSocket>),
+}
+
 enum ListenerState {
     Free { next: Option<usize> },
     Active { socket: Box<dyn IOSocket> },
@@ -19,17 +27,23 @@ impl Listener {
         self.arm_accept()
     }
 
-    pub fn accept_result_ready(&self) -> bool {
-        matches!(self.state, ListenerState::Active { .. }) && self.accept_completion.has_result()
+    pub fn step(&mut self) -> io::Result<ListenerStep> {
+        if !matches!(self.state, ListenerState::Active { .. })
+            || !self.accept_completion.has_result()
+        {
+            return Ok(ListenerStep::Idle);
+        }
+        let socket = self
+            .accept_completion
+            .take_result()
+            .expect("step() guarantees an accept result is ready")?;
+        self.arm_accept()?;
+        Ok(ListenerStep::Accepted(socket))
     }
 
-    pub fn take_accept_result(&mut self) -> Option<io::Result<Box<dyn IOSocket>>> {
-        self.accept_completion.take_result()
-    }
-
-    pub fn arm_accept(&mut self) -> io::Result<()> {
+    fn arm_accept(&mut self) -> io::Result<()> {
         let ListenerState::Active { socket } = &self.state else {
-            panic!("listener slot must be active before accept");
+            panic!("listener must be active before accept");
         };
         socket.accept(&mut self.accept_completion)
     }

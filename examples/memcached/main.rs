@@ -31,8 +31,8 @@ use std::{
 
 use betelgeuse::{IO, IOHandle, IOLoop, IOSocket, io_loop, slab::Slab};
 
-use connection::{Connection, Item, is_peer_disconnect};
-use listener::Listener;
+use connection::{Connection, ConnectionStep, Item};
+use listener::{Listener, ListenerStep};
 
 const ADDR: &str = "127.0.0.1:11211";
 const MAX_LISTENERS: usize = 4;
@@ -93,45 +93,33 @@ impl<A: Allocator + Clone> Server<A> {
         let mut progressed = false;
 
         for idx in 0..self.listeners.capacity() {
-            if self
-                .listeners
-                .entry_mut(idx)
-                .is_some_and(|s| s.accept_result_ready())
-            {
-                progressed = true;
-                self.handle_accept(idx)?;
+            let Some(listener) = self.listeners.entry_mut(idx) else {
+                continue;
+            };
+            match listener.step()? {
+                ListenerStep::Idle => {}
+                ListenerStep::Accepted(socket) => {
+                    progressed = true;
+                    self.insert_connection(socket)?;
+                }
             }
         }
 
         for idx in 0..self.connections.capacity() {
-            if self
-                .connections
-                .entry_mut(idx)
-                .is_some_and(|s| s.recv_result_ready())
-            {
-                progressed = true;
-                self.handle_recv(idx)?;
-            }
-            if self
-                .connections
-                .entry_mut(idx)
-                .is_some_and(|s| s.send_result_ready())
-            {
-                progressed = true;
-                self.handle_send(idx)?;
+            let Some(conn) = self.connections.entry_mut(idx) else {
+                continue;
+            };
+            match conn.step(&mut self.store)? {
+                ConnectionStep::Idle => {}
+                ConnectionStep::Progressed => progressed = true,
+                ConnectionStep::Close => {
+                    progressed = true;
+                    self.connections.release(idx);
+                }
             }
         }
 
         Ok(progressed)
-    }
-
-    fn handle_accept(&mut self, idx: usize) -> io::Result<()> {
-        let listener = self.listeners.entry_mut(idx).expect("valid slot");
-        let socket = listener
-            .take_accept_result()
-            .expect("accept step requires completion result")?;
-        listener.arm_accept()?;
-        self.insert_connection(socket)
     }
 
     fn insert_connection(&mut self, socket: Box<dyn IOSocket>) -> io::Result<()> {
@@ -159,88 +147,5 @@ impl<A: Allocator + Clone> Server<A> {
             return Err(err);
         }
         Ok(())
-    }
-
-    fn handle_recv(&mut self, idx: usize) -> io::Result<()> {
-        let conn = self.connections.entry_mut(idx).expect("valid slot");
-        let buf = match conn
-            .take_recv_result()
-            .expect("recv step requires completion result")
-        {
-            Ok(buf) => buf,
-            Err(err) if is_peer_disconnect(&err) => {
-                self.connections.release(idx);
-                return Ok(());
-            }
-            Err(err) => return Err(err),
-        };
-        if buf.is_empty() {
-            self.connections.release(idx);
-            return Ok(());
-        }
-
-        conn.proto.read_buf.extend_from_slice(&buf);
-        conn.proto.process_input(&mut self.store);
-
-        let next = if conn.proto.has_pending_output() {
-            conn.arm_send()
-        } else if conn.proto.close_after_write {
-            self.connections.release(idx);
-            return Ok(());
-        } else {
-            conn.arm_recv()
-        };
-
-        match next {
-            Ok(()) => Ok(()),
-            Err(err) if is_peer_disconnect(&err) => {
-                self.connections.release(idx);
-                Ok(())
-            }
-            Err(err) => Err(err),
-        }
-    }
-
-    fn handle_send(&mut self, idx: usize) -> io::Result<()> {
-        let conn = self.connections.entry_mut(idx).expect("valid slot");
-        let written = match conn
-            .take_send_result()
-            .expect("send step requires completion result")
-        {
-            Ok(n) => n,
-            Err(err) if is_peer_disconnect(&err) => {
-                self.connections.release(idx);
-                return Ok(());
-            }
-            Err(err) => return Err(err),
-        };
-        if written == 0 {
-            self.connections.release(idx);
-            return Ok(());
-        }
-
-        conn.proto.write_offset += written;
-        let next = if conn.proto.write_offset < conn.proto.write_buf.len() {
-            conn.arm_send()
-        } else {
-            conn.proto.finish_write();
-            if conn.proto.close_after_write {
-                self.connections.release(idx);
-                return Ok(());
-            } else if conn.proto.has_pending_output() {
-                conn.arm_send()
-            } else {
-                conn.arm_recv()
-            }
-        };
-
-        match next {
-            Ok(()) => Ok(()),
-            Err(err) if is_peer_disconnect(&err) => {
-                self.connections.release(idx);
-                Ok(())
-            }
-            Err(err) => Err(err),
-        }
     }
 }

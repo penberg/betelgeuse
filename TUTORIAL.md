@@ -104,32 +104,42 @@ as `EAGAIN`, `EWOULDBLOCK`, and `EINTR` stay inside the I/O layer.
 
 ## Owned State Machines
 
-State transitions happen in one place: `Server::step()`. Completion
-callbacks, if any, are small — they publish readiness, not transitions.
-The real transition runs when the server notices the ready slot.
+Each slot owns its own state machine. `Listener::step()` and
+`Connection::step()` know what phase they are in, what completion they are
+waiting on, and how to advance themselves. The server's job in
+`Server::step()` is just to walk the slots and react to what each one
+reports — *not* to encode the transition logic itself.
 
 ```rust
 pub fn step(&mut self) -> Result<()> {
-    if self.startup().is_some() {
-        self.handle_startup()?;
-    }
-
-    for listener in &mut *self.listeners.entries {
-        if let Some(socket) = listener.step()? {
-            Self::register_connection(&mut self.connections, socket)?;
+    for idx in 0..self.listeners.capacity() {
+        let Some(listener) = self.listeners.entry_mut(idx) else {
+            continue;
+        };
+        if let ListenerStep::Accepted(socket) = listener.step()? {
+            self.insert_connection(socket)?;
         }
     }
 
-    for connection in self.connections.entries.iter_mut() {
-        // advance recv/send/request/close state
+    for idx in 0..self.connections.capacity() {
+        let Some(conn) = self.connections.entry_mut(idx) else {
+            continue;
+        };
+        match conn.step()? {
+            ConnectionStep::Idle | ConnectionStep::Progressed => {}
+            ConnectionStep::Close => self.connections.release(idx),
+        }
     }
 
     Ok(())
 }
 ```
 
-The consequence: if server state changed, there is a small, known set of
-places to look. Callbacks never form a hidden control plane.
+Completion callbacks, if any, are small — they publish readiness, not
+transitions. The real transition runs when the slot's `step()` notices the
+ready completion. The consequence: if server state changed, there is a
+small, known set of places to look, and the loop in `Server::step()` stays
+free of `recv_result_ready` / `send_result_ready` branches.
 
 ## Fixed-Capacity Tables
 
@@ -235,11 +245,23 @@ fn insert_connection(&mut self, socket: Box<dyn IOSocket>) -> io::Result<()> {
 
 ```rust
 for idx in 0..self.connections.capacity() {
-    if self.connections.entry_mut(idx).is_some_and(|c| c.recv_result_ready()) {
-        self.handle_recv(idx)?;
+    let Some(conn) = self.connections.entry_mut(idx) else {
+        continue;
+    };
+    match conn.step()? {
+        ConnectionStep::Idle => {}
+        ConnectionStep::Progressed => progressed = true,
+        ConnectionStep::Close => {
+            progressed = true;
+            self.connections.release(idx);
+        }
     }
 }
 ```
+
+Each entry owns its own state machine — the outer loop just walks them and
+reacts to whatever `step()` reports. The state-machine logic for "what's
+the next I/O direction?" lives inside `Connection`, not the server.
 
 Because the backing array never resizes, a slot's address is stable for the
 lifetime of the slab. That matters: completion slots live inside entries,
