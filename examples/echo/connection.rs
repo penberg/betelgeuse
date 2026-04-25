@@ -7,7 +7,7 @@ pub const READ_CHUNK: usize = 8192;
 /// Outcome of advancing a connection's state machine for one tick.
 pub enum ConnectionStep {
     /// Slot is still alive — either nothing was ready or it advanced.
-    Keep,
+    Continue,
     /// The peer hung up or sent zero; the owner should release the slot.
     Close,
 }
@@ -55,7 +55,7 @@ impl Connection {
                 phase: Phase::Sending { .. },
                 ..
             } if self.send_completion.has_result() => self.complete_send(),
-            _ => Ok(ConnectionStep::Keep),
+            _ => Ok(ConnectionStep::Continue),
         }
     }
 
@@ -72,7 +72,7 @@ impl Connection {
         };
         *phase = Phase::Sending { buf, offset: 0 };
         self.arm_send()?;
-        Ok(ConnectionStep::Keep)
+        Ok(ConnectionStep::Continue)
     }
 
     fn complete_send(&mut self) -> io::Result<ConnectionStep> {
@@ -96,7 +96,7 @@ impl Connection {
         } else {
             self.arm_send()
         }?;
-        Ok(ConnectionStep::Keep)
+        Ok(ConnectionStep::Continue)
     }
 
     fn arm_recv(&mut self) -> io::Result<()> {

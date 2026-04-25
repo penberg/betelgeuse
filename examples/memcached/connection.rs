@@ -9,7 +9,7 @@ pub const CRLF: &[u8] = b"\r\n";
 /// Outcome of advancing a connection's state machine for one tick.
 pub enum ConnectionStep {
     /// Slot is still alive — either nothing was ready or it advanced.
-    Keep,
+    Continue,
     /// The peer hung up, sent zero, or the protocol asked to close.
     Close,
 }
@@ -59,7 +59,7 @@ impl Connection {
                 phase: Phase::Sending,
                 ..
             } if self.send_completion.has_result() => self.complete_send(),
-            _ => Ok(ConnectionStep::Keep),
+            _ => Ok(ConnectionStep::Continue),
         }
     }
 
@@ -154,7 +154,7 @@ impl Connection {
 
 fn classify(result: io::Result<()>) -> io::Result<ConnectionStep> {
     match result {
-        Ok(()) => Ok(ConnectionStep::Keep),
+        Ok(()) => Ok(ConnectionStep::Continue),
         Err(err) if is_peer_disconnect(&err) => Ok(ConnectionStep::Close),
         Err(err) => Err(err),
     }
