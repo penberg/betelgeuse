@@ -6,11 +6,22 @@
 //! once during construction and is never resized.
 
 use std::alloc::Allocator;
+use std::ops::{Deref, DerefMut};
 
 /// Fixed-capacity object slab backed by an intrusive free list.
 pub struct Slab<A: Allocator, T> {
     pub(crate) entries: Box<[T], A>,
     free_head: Option<usize>,
+}
+
+/// Mutable handle to a newly acquired slab entry.
+///
+/// The entry has been removed from the free list already. If the guard is
+/// dropped while the entry is still logically free, the slot is returned to
+/// the free list automatically.
+pub struct AcquiredEntry<'a, A: Allocator, T: SlabEntry> {
+    slab: &'a mut Slab<A, T>,
+    id: Option<usize>,
 }
 
 impl<A: Allocator, T: SlabEntry> Slab<A, T> {
@@ -58,6 +69,15 @@ impl<A: Allocator, T: SlabEntry> Slab<A, T> {
         Some(id)
     }
 
+    /// Allocates one entry from the free list and returns a mutable guard to it.
+    pub fn acquire_mut(&mut self) -> Option<AcquiredEntry<'_, A, T>> {
+        let id = self.acquire()?;
+        Some(AcquiredEntry {
+            slab: self,
+            id: Some(id),
+        })
+    }
+
     /// Releases an occupied entry back to the free list.
     pub fn release(&mut self, id: usize) {
         let entry = self
@@ -86,6 +106,49 @@ pub trait SlabEntry {
 
     /// Releases an occupied entry and links it to `next`.
     fn release(&mut self, next: Option<usize>);
+}
+
+impl<A: Allocator, T: SlabEntry> AcquiredEntry<'_, A, T> {
+    /// Returns the acquired slot index.
+    pub fn id(&self) -> usize {
+        self.id.expect("acquired entry guard must own a slot")
+    }
+
+    /// Releases the slot back to the slab immediately.
+    pub fn release(mut self) {
+        let id = self
+            .id
+            .take()
+            .expect("acquired entry guard must own a slot");
+        self.slab.release(id);
+    }
+}
+
+impl<A: Allocator, T: SlabEntry> Deref for AcquiredEntry<'_, A, T> {
+    type Target = T;
+
+    fn deref(&self) -> &Self::Target {
+        let id = self.id.expect("acquired entry guard must own a slot");
+        &self.slab.entries[id]
+    }
+}
+
+impl<A: Allocator, T: SlabEntry> DerefMut for AcquiredEntry<'_, A, T> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        let id = self.id.expect("acquired entry guard must own a slot");
+        &mut self.slab.entries[id]
+    }
+}
+
+impl<A: Allocator, T: SlabEntry> Drop for AcquiredEntry<'_, A, T> {
+    fn drop(&mut self) {
+        let Some(id) = self.id.take() else {
+            return;
+        };
+        if self.slab.entries[id].is_free() {
+            self.slab.free_head = Some(id);
+        }
+    }
 }
 
 #[cfg(test)]
@@ -173,6 +236,16 @@ mod tests {
             }
 
             prop_assert!(slab.acquire().is_none());
+        }
+
+        #[test]
+        fn acquire_mut_drop_restores_a_free_slot(capacity in 1usize..128) {
+            let mut slab = Slab::<Global, TestEntry>::new(Global, capacity);
+            let id = slab.acquire_mut().expect("slab must have free entries").id();
+            let reacquired = slab
+                .acquire()
+                .expect("dropped free acquired entry must be reusable");
+            prop_assert_eq!(reacquired, id);
         }
 
         #[test]

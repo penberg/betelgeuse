@@ -1,6 +1,6 @@
 use std::{alloc::Allocator, io, net::SocketAddr};
 
-use betelgeuse::{IO, IOHandle, IOSocket, slab::Slab};
+use betelgeuse::{IOHandle, IOSocket, slab::Slab};
 
 use crate::connection::{Connection, ConnectionStep};
 use crate::listener::{Listener, ListenerStep};
@@ -24,19 +24,11 @@ impl<A: Allocator + Clone> Server<A> {
     }
 
     pub fn listen(&mut self, addr: SocketAddr) -> io::Result<()> {
-        let id = self
+        let mut listener = self
             .listeners
-            .acquire()
+            .acquire_mut()
             .ok_or_else(|| io::Error::other("listener pool exhausted"))?;
-        let socket = self.io.socket()?;
-        if let Err(err) = socket.bind(addr) {
-            self.listeners.release(id);
-            return Err(err);
-        }
-        self.listeners
-            .entry_mut(id)
-            .expect("just-acquired slot must exist")
-            .activate(socket)
+        listener.listen(&self.io, addr)
     }
 
     pub fn step(&mut self) -> io::Result<()> {
@@ -45,7 +37,7 @@ impl<A: Allocator + Clone> Server<A> {
                 continue;
             };
             if let ListenerStep::Accepted(socket) = listener.step()? {
-                self.insert_connection(socket)?;
+                self.register_connection(socket)?;
             }
         }
 
@@ -61,19 +53,14 @@ impl<A: Allocator + Clone> Server<A> {
         Ok(())
     }
 
-    fn insert_connection(&mut self, socket: Box<dyn IOSocket>) -> io::Result<()> {
-        let Some(id) = self.connections.acquire() else {
+    fn register_connection(&mut self, socket: Box<dyn IOSocket>) -> io::Result<()> {
+        let Some(mut conn) = self.connections.acquire_mut() else {
             eprintln!("connection pool exhausted, dropping accepted socket");
             socket.close();
             return Ok(());
         };
-        if let Err(err) = self
-            .connections
-            .entry_mut(id)
-            .expect("acquired slot")
-            .open(socket)
-        {
-            self.connections.release(id);
+        if let Err(err) = conn.open(socket) {
+            conn.release();
             return Err(err);
         }
         Ok(())

@@ -1,6 +1,8 @@
 use std::io;
 
-use betelgeuse::{AcceptCompletion, IOSocket, slab::SlabEntry};
+use std::net::SocketAddr;
+
+use betelgeuse::{AcceptCompletion, IO, IOSocket, slab::SlabEntry};
 
 /// Outcome of advancing a listener's state machine for one tick.
 pub enum ListenerStep {
@@ -21,7 +23,13 @@ pub struct Listener {
 }
 
 impl Listener {
-    pub fn activate(&mut self, socket: Box<dyn IOSocket>) -> io::Result<()> {
+    pub fn listen(&mut self, io: &impl IO, addr: SocketAddr) -> io::Result<()> {
+        let socket = io.socket()?;
+        socket.bind(addr)?;
+        self.activate(socket)
+    }
+
+    fn activate(&mut self, socket: Box<dyn IOSocket>) -> io::Result<()> {
         self.state = ListenerState::Active { socket };
         self.accept_completion = AcceptCompletion::new();
         self.arm_accept()
