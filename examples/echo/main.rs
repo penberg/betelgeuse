@@ -37,8 +37,7 @@ fn main() -> io::Result<()> {
     let io_loop = io_loop(allocator)?;
     let addr: SocketAddr = ADDR.parse().expect("valid address");
 
-    let mut server = Server::new(allocator, io_loop.io());
-    server.listen(addr)?;
+    let mut server = Server::start(allocator, io_loop.io(), addr)?;
     println!(
         "echo listening on {addr} (backend: {})",
         io_loop.backend_name()

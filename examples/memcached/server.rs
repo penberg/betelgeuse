@@ -5,40 +5,27 @@ use betelgeuse::{IOHandle, IOSocket, slab::Slab};
 use crate::connection::{Connection, ConnectionStep, Item};
 use crate::listener::{Listener, ListenerStep};
 
-const MAX_LISTENERS: usize = 4;
 const MAX_CONNECTIONS: usize = 1024;
 
 pub struct Server<A: Allocator + Clone> {
-    io: IOHandle,
-    listeners: Slab<A, Listener>,
+    listener: Listener,
     connections: Slab<A, Connection>,
     store: HashMap<Vec<u8>, Item>,
 }
 
 impl<A: Allocator + Clone> Server<A> {
-    pub fn new(allocator: A, io: IOHandle) -> Self {
-        Self {
-            io,
-            listeners: Slab::new(allocator.clone(), MAX_LISTENERS),
+    pub fn start(allocator: A, io: IOHandle, addr: SocketAddr) -> io::Result<Self> {
+        Ok(Self {
+            listener: Listener::start(&io, addr)?,
             connections: Slab::new(allocator, MAX_CONNECTIONS),
             store: HashMap::new(),
-        }
-    }
-
-    pub fn listen(&mut self, addr: SocketAddr) -> io::Result<()> {
-        let mut listener = self
-            .listeners
-            .acquire_mut()
-            .ok_or_else(|| io::Error::other("listener pool exhausted"))?;
-        listener.listen(&self.io, addr)
+        })
     }
 
     pub fn step(&mut self) -> io::Result<()> {
         let connections = &mut self.connections;
-        for mut listener in self.listeners.entries_mut() {
-            if let ListenerStep::Accepted(socket) = listener.step()? {
-                Self::register_connection(connections, socket)?;
-            }
+        if let ListenerStep::Accepted(socket) = self.listener.step()? {
+            Self::register_connection(connections, socket)?;
         }
 
         let store = &mut self.store;
