@@ -6,6 +6,7 @@
 //! once during construction and is never resized.
 
 use std::alloc::Allocator;
+use std::marker::PhantomData;
 use std::ops::{Deref, DerefMut};
 
 /// Fixed-capacity object slab backed by an intrusive free list.
@@ -14,14 +15,24 @@ pub struct Slab<A: Allocator, T> {
     free_head: Option<usize>,
 }
 
-/// Mutable handle to a newly acquired slab entry.
+/// Mutable handle to a slab entry.
 ///
-/// The entry has been removed from the free list already. If the guard is
-/// dropped while the entry is still logically free, the slot is returned to
-/// the free list automatically.
-pub struct AcquiredEntry<'a, A: Allocator, T: SlabEntry> {
-    slab: &'a mut Slab<A, T>,
+/// If the guard is dropped while the entry is logically free, the slot is
+/// returned to the free list automatically.
+pub struct EntryMut<'a, T: SlabEntry> {
+    entries: *mut T,
+    free_head: *mut Option<usize>,
     id: Option<usize>,
+    _marker: PhantomData<&'a mut T>,
+}
+
+/// Mutable iterator over allocated slab entries.
+pub struct EntriesMut<'a, T: SlabEntry> {
+    entries: *mut T,
+    free_head: *mut Option<usize>,
+    len: usize,
+    next: usize,
+    _marker: PhantomData<&'a mut T>,
 }
 
 impl<A: Allocator, T: SlabEntry> Slab<A, T> {
@@ -48,16 +59,15 @@ impl<A: Allocator, T: SlabEntry> Slab<A, T> {
         self.entries.get_mut(id)
     }
 
-    /// Returns an occupied entry by index.
-    pub fn occupied_mut(&mut self, id: usize) -> Option<&mut T> {
-        self.entries.get_mut(id).filter(|entry| !entry.is_free())
-    }
-
-    /// Returns a mutable iterator over all entries in the slab, both free and
-    /// occupied. Callers are expected to use [`SlabEntry::is_free`] to filter
-    /// when they only want occupied entries.
-    pub fn iter_mut(&mut self) -> std::slice::IterMut<'_, T> {
-        self.entries.iter_mut()
+    /// Returns a mutable iterator over allocated entries in the slab.
+    pub fn entries_mut(&mut self) -> EntriesMut<'_, T> {
+        EntriesMut {
+            entries: self.entries.as_mut_ptr(),
+            free_head: &mut self.free_head,
+            len: self.entries.len(),
+            next: 0,
+            _marker: PhantomData,
+        }
     }
 
     /// Allocates one entry from the free list.
@@ -70,11 +80,13 @@ impl<A: Allocator, T: SlabEntry> Slab<A, T> {
     }
 
     /// Allocates one entry from the free list and returns a mutable guard to it.
-    pub fn acquire_mut(&mut self) -> Option<AcquiredEntry<'_, A, T>> {
+    pub fn acquire_mut(&mut self) -> Option<EntryMut<'_, T>> {
         let id = self.acquire()?;
-        Some(AcquiredEntry {
-            slab: self,
+        Some(EntryMut {
+            entries: self.entries.as_mut_ptr(),
+            free_head: &mut self.free_head,
             id: Some(id),
+            _marker: PhantomData,
         })
     }
 
@@ -108,45 +120,76 @@ pub trait SlabEntry {
     fn release(&mut self, next: Option<usize>);
 }
 
-impl<A: Allocator, T: SlabEntry> AcquiredEntry<'_, A, T> {
-    /// Returns the acquired slot index.
+impl<T: SlabEntry> EntryMut<'_, T> {
+    /// Returns the slot index.
     pub fn id(&self) -> usize {
-        self.id.expect("acquired entry guard must own a slot")
+        self.id.expect("entry guard must own a slot")
     }
 
     /// Releases the slot back to the slab immediately.
     pub fn release(mut self) {
-        let id = self
-            .id
-            .take()
-            .expect("acquired entry guard must own a slot");
-        self.slab.release(id);
+        self.release_inner();
+    }
+
+    fn release_inner(&mut self) {
+        let id = self.id.take().expect("entry guard must own a slot");
+        unsafe {
+            let entry = &mut *self.entries.add(id);
+            assert!(!entry.is_free(), "slab slot must be occupied");
+            entry.release(*self.free_head);
+            *self.free_head = Some(id);
+        }
     }
 }
 
-impl<A: Allocator, T: SlabEntry> Deref for AcquiredEntry<'_, A, T> {
+impl<'a, T: SlabEntry> Iterator for EntriesMut<'a, T> {
+    type Item = EntryMut<'a, T>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        while self.next < self.len {
+            let id = self.next;
+            self.next += 1;
+            unsafe {
+                let entry = &mut *self.entries.add(id);
+                if !entry.is_free() {
+                    return Some(EntryMut {
+                        entries: self.entries,
+                        free_head: self.free_head,
+                        id: Some(id),
+                        _marker: PhantomData,
+                    });
+                }
+            }
+        }
+        None
+    }
+}
+
+impl<T: SlabEntry> Deref for EntryMut<'_, T> {
     type Target = T;
 
     fn deref(&self) -> &Self::Target {
-        let id = self.id.expect("acquired entry guard must own a slot");
-        &self.slab.entries[id]
+        let id = self.id.expect("entry guard must own a slot");
+        unsafe { &*self.entries.add(id) }
     }
 }
 
-impl<A: Allocator, T: SlabEntry> DerefMut for AcquiredEntry<'_, A, T> {
+impl<T: SlabEntry> DerefMut for EntryMut<'_, T> {
     fn deref_mut(&mut self) -> &mut Self::Target {
-        let id = self.id.expect("acquired entry guard must own a slot");
-        &mut self.slab.entries[id]
+        let id = self.id.expect("entry guard must own a slot");
+        unsafe { &mut *self.entries.add(id) }
     }
 }
 
-impl<A: Allocator, T: SlabEntry> Drop for AcquiredEntry<'_, A, T> {
+impl<T: SlabEntry> Drop for EntryMut<'_, T> {
     fn drop(&mut self) {
         let Some(id) = self.id.take() else {
             return;
         };
-        if self.slab.entries[id].is_free() {
-            self.slab.free_head = Some(id);
+        unsafe {
+            if (&*self.entries.add(id)).is_free() {
+                *self.free_head = Some(id);
+            }
         }
     }
 }
@@ -246,6 +289,22 @@ mod tests {
                 .acquire()
                 .expect("dropped free acquired entry must be reusable");
             prop_assert_eq!(reacquired, id);
+        }
+
+        #[test]
+        fn entries_mut_yields_only_allocated_entries(capacity in 0usize..64) {
+            let mut slab = Slab::<Global, TestEntry>::new(Global, capacity);
+            let mut expected = BTreeSet::new();
+
+            for _ in 0..(capacity / 2) {
+                let mut entry = slab.acquire_mut().expect("slab must have free entries");
+                let id = entry.id();
+                entry.occupy();
+                expected.insert(id);
+            }
+
+            let actual: BTreeSet<_> = slab.entries_mut().map(|entry| entry.id()).collect();
+            prop_assert_eq!(actual, expected);
         }
 
         #[test]

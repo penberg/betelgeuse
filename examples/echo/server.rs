@@ -32,29 +32,27 @@ impl<A: Allocator + Clone> Server<A> {
     }
 
     pub fn step(&mut self) -> io::Result<()> {
-        for idx in 0..self.listeners.capacity() {
-            let Some(listener) = self.listeners.entry_mut(idx) else {
-                continue;
-            };
+        let connections = &mut self.connections;
+        for mut listener in self.listeners.entries_mut() {
             if let ListenerStep::Accepted(socket) = listener.step()? {
-                self.register_connection(socket)?;
+                Self::register_connection(connections, socket)?;
             }
         }
 
-        for idx in 0..self.connections.capacity() {
-            let Some(conn) = self.connections.entry_mut(idx) else {
-                continue;
-            };
+        for mut conn in self.connections.entries_mut() {
             if let ConnectionStep::Close = conn.step()? {
-                self.connections.release(idx);
+                conn.release();
             }
         }
 
         Ok(())
     }
 
-    fn register_connection(&mut self, socket: Box<dyn IOSocket>) -> io::Result<()> {
-        let Some(mut conn) = self.connections.acquire_mut() else {
+    fn register_connection(
+        connections: &mut Slab<A, Connection>,
+        socket: Box<dyn IOSocket>,
+    ) -> io::Result<()> {
+        let Some(mut conn) = connections.acquire_mut() else {
             eprintln!("connection pool exhausted, dropping accepted socket");
             socket.close();
             return Ok(());
