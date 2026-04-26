@@ -13,12 +13,12 @@ pub enum ConnectionStep {
 }
 
 enum ConnectionState {
-    Free {
-        next: Option<usize>,
-    },
     Open {
         socket: Box<dyn IOSocket>,
         phase: Phase,
+    },
+    Free {
+        next: Option<usize>,
     },
 }
 
