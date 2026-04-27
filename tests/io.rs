@@ -17,7 +17,7 @@ use std::{
 use betelgeuse::{
     AcceptCompletion, ConnectCompletion, FsyncCompletion, IO, IOLoop, IOLoopHandle,
     MkdirCompletion, OpenOptions, PReadCompletion, PWriteCompletion, RecvCompletion,
-    SendCompletion, SizeCompletion, io_loop,
+    SendCompletion, StatCompletion, io_loop,
 };
 use tempfile::TempDir;
 
@@ -153,8 +153,8 @@ io_test! {
         }
         c.take_result().unwrap()?;
 
-        let mut c = SizeCompletion::new();
-        file.size(&mut c)?;
+        let mut c = StatCompletion::new();
+        file.stat(&mut c)?;
         while !c.has_result() {
             io_loop.step()?;
         }
@@ -171,22 +171,22 @@ io_test! {
 }
 
 io_test! {
-    fn pwrite_then_size_preserves_fifo_order(io_loop) -> io::Result<()> {
+    fn pwrite_then_stat_preserves_fifo_order(io_loop) -> io::Result<()> {
         let dir = TempDir::new().unwrap();
-        let path = dir.path().join("ordered-size.bin");
+        let path = dir.path().join("ordered-stat.bin");
         let file = io_loop.io().open(&path, rw_create_truncate())?;
 
         let mut write_c = PWriteCompletion::new();
-        let mut size_c = SizeCompletion::new();
+        let mut stat_c = StatCompletion::new();
         file.pwrite(&mut write_c, b"xyz".to_vec(), 0)?;
-        file.size(&mut size_c)?;
+        file.stat(&mut stat_c)?;
 
-        while !write_c.has_result() || !size_c.has_result() {
+        while !write_c.has_result() || !stat_c.has_result() {
             io_loop.step()?;
         }
 
         assert_eq!(write_c.take_result().unwrap()?, 3);
-        assert_eq!(size_c.take_result().unwrap()?, 3);
+        assert_eq!(stat_c.take_result().unwrap()?, 3);
         Ok(())
     }
 }
@@ -230,8 +230,8 @@ io_test! {
             },
         )?;
 
-        let mut c = SizeCompletion::new();
-        file.size(&mut c)?;
+        let mut c = StatCompletion::new();
+        file.stat(&mut c)?;
         while !c.has_result() {
             io_loop.step()?;
         }
