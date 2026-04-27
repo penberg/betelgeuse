@@ -3,7 +3,7 @@
 //! There is one concrete completion type per operation kind:
 //! [`AcceptCompletion`], [`RecvCompletion`], [`SendCompletion`],
 //! [`PReadCompletion`], [`PWriteCompletion`], [`FsyncCompletion`],
-//! [`SizeCompletion`], [`MkdirCompletion`]. Each is a thin wrapper around
+//! [`StatCompletion`], [`MkdirCompletion`]. Each is a thin wrapper around
 //! [`CompletionInner`] (the shared state machine and operation slot) and
 //! carries its own typed result.
 //!
@@ -144,8 +144,8 @@ define_completion!(
 );
 
 define_completion!(
-    /// Completion slot for a file size query. Yields the size in bytes.
-    pub struct SizeCompletion => io::Result<u64>
+    /// Completion slot for a file stat operation. Yields the file size in bytes.
+    pub struct StatCompletion => io::Result<u64>
 );
 
 define_completion!(
@@ -272,8 +272,8 @@ pub enum Operation {
     PWrite(PWriteOp),
     /// Flush file data to stable storage.
     Fsync(FsyncOp),
-    /// Read file size metadata.
-    Size(SizeOp),
+    /// Read file metadata.
+    Stat(StatOp),
     /// Create one directory.
     Mkdir(MkdirOp),
 }
@@ -325,9 +325,15 @@ pub struct FsyncOp {
     pub fd: RawFd,
 }
 
-/// Payload for a file size query.
-pub struct SizeOp {
+/// Payload for a file stat operation.
+///
+/// On Linux this owns the `statx` buffer that the io_uring `IORING_OP_STATX`
+/// writes into asynchronously; the buffer must outlive the submission, so it
+/// lives in the operation armed in the caller-owned completion.
+pub struct StatOp {
     pub fd: RawFd,
+    #[cfg(target_os = "linux")]
+    pub statx: Box<std::mem::MaybeUninit<libc::statx>>,
 }
 
 /// Payload for a `mkdir(2)` operation.
