@@ -29,6 +29,125 @@ use std::{ffi::CString, io, os::fd::RawFd};
 
 use super::IOSocket;
 
+/// Defines a completion type backed by [`CompletionInner`] that stores a result.
+///
+/// This macro generates a `#[repr(C)]` struct with a fixed layout and a standard
+/// set of methods for managing completion state and retrieving results.
+///
+/// # Syntax
+///
+/// ```text
+/// define_completion!(
+///     $(#[$meta])*
+///     $vis struct Name => ResultType
+/// );
+/// ```
+macro_rules! define_completion {
+    (
+        $(#[$meta:meta])*
+        $vis:vis struct $name:ident => $result_ty:ty
+    ) => {
+        $(#[$meta])*
+        #[repr(C)]
+        $vis struct $name {
+            inner: CompletionInner,
+            result: Option<$result_ty>,
+        }
+
+        impl $name {
+            pub fn new() -> Self {
+                Self {
+                    inner: CompletionInner::new(),
+                    result: None,
+                }
+            }
+
+            pub fn state(&self) -> CompletionState {
+                self.inner.state()
+            }
+
+            pub fn is_idle(&self) -> bool {
+                self.inner.is_idle()
+            }
+
+            pub fn has_result(&self) -> bool {
+                self.result.is_some()
+            }
+
+            pub fn take_result(&mut self) -> Option<$result_ty> {
+                let result = self.result.take()?;
+                self.inner.reset();
+                Some(result)
+            }
+
+            pub fn inner_mut(&mut self) -> &mut CompletionInner {
+                &mut self.inner
+            }
+
+            /// Reconstitutes the typed completion from a pointer to its inner slot.
+            ///
+            /// # Safety
+            ///
+            /// `inner` must be the first field of a live instance of this typed
+            /// completion.
+            pub unsafe fn from_inner_mut(inner: &mut CompletionInner) -> &mut Self {
+                unsafe { &mut *(inner as *mut CompletionInner as *mut Self) }
+            }
+
+            pub fn complete(&mut self, result: $result_ty) {
+                self.inner.mark_completed();
+                self.result = Some(result);
+            }
+        }
+
+        impl Default for $name {
+            fn default() -> Self {
+                Self::new()
+            }
+        }
+    };
+}
+
+define_completion!(
+    /// Completion slot for an `accept(2)` operation. Yields the accepted socket.
+    pub struct AcceptCompletion => io::Result<Box<dyn IOSocket>>
+);
+
+define_completion!(
+    /// Completion slot for a `recv(2)`-style operation. Yields the bytes read.
+    pub struct RecvCompletion => io::Result<Vec<u8>>
+);
+
+define_completion!(
+    /// Completion slot for a `send(2)`-style operation. Yields the byte count sent.
+    pub struct SendCompletion => io::Result<usize>
+);
+
+define_completion!(
+    /// Completion slot for a positional file read. Yields the bytes read.
+    pub struct PReadCompletion => io::Result<Vec<u8>>
+);
+
+define_completion!(
+    /// Completion slot for a positional file write. Yields the byte count written.
+    pub struct PWriteCompletion => io::Result<usize>
+);
+
+define_completion!(
+    /// Completion slot for an `fsync(2)` operation.
+    pub struct FsyncCompletion => io::Result<()>
+);
+
+define_completion!(
+    /// Completion slot for a file size query. Yields the size in bytes.
+    pub struct SizeCompletion => io::Result<u64>
+);
+
+define_completion!(
+    /// Completion slot for a `mkdir(2)` operation.
+    pub struct MkdirCompletion => io::Result<()>
+);
+
 /// Type-erased completion slot embedded in every typed completion.
 ///
 /// Holds the lifecycle state and the currently-armed [`Operation`]. The
@@ -124,486 +243,6 @@ pub enum CompletionState {
     Submitted,
     /// The backend has produced a terminal result.
     Completed,
-}
-
-/// Completion slot for an `accept(2)` operation. Yields the accepted socket.
-#[repr(C)]
-pub struct AcceptCompletion {
-    inner: CompletionInner,
-    result: Option<io::Result<Box<dyn IOSocket>>>,
-}
-
-impl AcceptCompletion {
-    pub fn new() -> Self {
-        Self {
-            inner: CompletionInner::new(),
-            result: None,
-        }
-    }
-
-    pub fn state(&self) -> CompletionState {
-        self.inner.state()
-    }
-
-    pub fn is_idle(&self) -> bool {
-        self.inner.is_idle()
-    }
-
-    pub fn has_result(&self) -> bool {
-        self.result.is_some()
-    }
-
-    pub fn take_result(&mut self) -> Option<io::Result<Box<dyn IOSocket>>> {
-        let result = self.result.take()?;
-        self.inner.reset();
-        Some(result)
-    }
-
-    pub fn inner_mut(&mut self) -> &mut CompletionInner {
-        &mut self.inner
-    }
-
-    /// Reconstitutes the typed completion from a pointer to its inner slot.
-    ///
-    /// # Safety
-    ///
-    /// `inner` must be the first field of a live instance of this typed
-    /// completion. Backends uphold this by only calling this method on the
-    /// `Operation` arm matching the typed completion that armed the slot.
-    pub unsafe fn from_inner_mut(inner: &mut CompletionInner) -> &mut Self {
-        unsafe { &mut *(inner as *mut CompletionInner as *mut Self) }
-    }
-
-    pub fn complete(&mut self, result: io::Result<Box<dyn IOSocket>>) {
-        self.inner.mark_completed();
-        self.result = Some(result);
-    }
-}
-
-impl Default for AcceptCompletion {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-/// Completion slot for a `recv(2)`-style operation. Yields the bytes read.
-#[repr(C)]
-pub struct RecvCompletion {
-    inner: CompletionInner,
-    result: Option<io::Result<Vec<u8>>>,
-}
-
-impl RecvCompletion {
-    pub fn new() -> Self {
-        Self {
-            inner: CompletionInner::new(),
-            result: None,
-        }
-    }
-
-    pub fn state(&self) -> CompletionState {
-        self.inner.state()
-    }
-
-    pub fn is_idle(&self) -> bool {
-        self.inner.is_idle()
-    }
-
-    pub fn has_result(&self) -> bool {
-        self.result.is_some()
-    }
-
-    pub fn take_result(&mut self) -> Option<io::Result<Vec<u8>>> {
-        let result = self.result.take()?;
-        self.inner.reset();
-        Some(result)
-    }
-
-    pub fn inner_mut(&mut self) -> &mut CompletionInner {
-        &mut self.inner
-    }
-
-    /// Reconstitutes the typed completion from a pointer to its inner slot.
-    ///
-    /// # Safety
-    ///
-    /// `inner` must be the first field of a live instance of this typed
-    /// completion. Backends uphold this by only calling this method on the
-    /// `Operation` arm matching the typed completion that armed the slot.
-    pub unsafe fn from_inner_mut(inner: &mut CompletionInner) -> &mut Self {
-        unsafe { &mut *(inner as *mut CompletionInner as *mut Self) }
-    }
-
-    pub fn complete(&mut self, result: io::Result<Vec<u8>>) {
-        self.inner.mark_completed();
-        self.result = Some(result);
-    }
-}
-
-impl Default for RecvCompletion {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-/// Completion slot for a `send(2)`-style operation. Yields the byte count sent.
-#[repr(C)]
-pub struct SendCompletion {
-    inner: CompletionInner,
-    result: Option<io::Result<usize>>,
-}
-
-impl SendCompletion {
-    pub fn new() -> Self {
-        Self {
-            inner: CompletionInner::new(),
-            result: None,
-        }
-    }
-
-    pub fn state(&self) -> CompletionState {
-        self.inner.state()
-    }
-
-    pub fn is_idle(&self) -> bool {
-        self.inner.is_idle()
-    }
-
-    pub fn has_result(&self) -> bool {
-        self.result.is_some()
-    }
-
-    pub fn take_result(&mut self) -> Option<io::Result<usize>> {
-        let result = self.result.take()?;
-        self.inner.reset();
-        Some(result)
-    }
-
-    pub fn inner_mut(&mut self) -> &mut CompletionInner {
-        &mut self.inner
-    }
-
-    /// Reconstitutes the typed completion from a pointer to its inner slot.
-    ///
-    /// # Safety
-    ///
-    /// `inner` must be the first field of a live instance of this typed
-    /// completion. Backends uphold this by only calling this method on the
-    /// `Operation` arm matching the typed completion that armed the slot.
-    pub unsafe fn from_inner_mut(inner: &mut CompletionInner) -> &mut Self {
-        unsafe { &mut *(inner as *mut CompletionInner as *mut Self) }
-    }
-
-    pub fn complete(&mut self, result: io::Result<usize>) {
-        self.inner.mark_completed();
-        self.result = Some(result);
-    }
-}
-
-impl Default for SendCompletion {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-/// Completion slot for a positional file read. Yields the bytes read.
-#[repr(C)]
-pub struct PReadCompletion {
-    inner: CompletionInner,
-    result: Option<io::Result<Vec<u8>>>,
-}
-
-impl PReadCompletion {
-    pub fn new() -> Self {
-        Self {
-            inner: CompletionInner::new(),
-            result: None,
-        }
-    }
-
-    pub fn state(&self) -> CompletionState {
-        self.inner.state()
-    }
-
-    pub fn is_idle(&self) -> bool {
-        self.inner.is_idle()
-    }
-
-    pub fn has_result(&self) -> bool {
-        self.result.is_some()
-    }
-
-    pub fn take_result(&mut self) -> Option<io::Result<Vec<u8>>> {
-        let result = self.result.take()?;
-        self.inner.reset();
-        Some(result)
-    }
-
-    pub fn inner_mut(&mut self) -> &mut CompletionInner {
-        &mut self.inner
-    }
-
-    /// Reconstitutes the typed completion from a pointer to its inner slot.
-    ///
-    /// # Safety
-    ///
-    /// `inner` must be the first field of a live instance of this typed
-    /// completion. Backends uphold this by only calling this method on the
-    /// `Operation` arm matching the typed completion that armed the slot.
-    pub unsafe fn from_inner_mut(inner: &mut CompletionInner) -> &mut Self {
-        unsafe { &mut *(inner as *mut CompletionInner as *mut Self) }
-    }
-
-    pub fn complete(&mut self, result: io::Result<Vec<u8>>) {
-        self.inner.mark_completed();
-        self.result = Some(result);
-    }
-}
-
-impl Default for PReadCompletion {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-/// Completion slot for a positional file write. Yields the byte count written.
-#[repr(C)]
-pub struct PWriteCompletion {
-    inner: CompletionInner,
-    result: Option<io::Result<usize>>,
-}
-
-impl PWriteCompletion {
-    pub fn new() -> Self {
-        Self {
-            inner: CompletionInner::new(),
-            result: None,
-        }
-    }
-
-    pub fn state(&self) -> CompletionState {
-        self.inner.state()
-    }
-
-    pub fn is_idle(&self) -> bool {
-        self.inner.is_idle()
-    }
-
-    pub fn has_result(&self) -> bool {
-        self.result.is_some()
-    }
-
-    pub fn take_result(&mut self) -> Option<io::Result<usize>> {
-        let result = self.result.take()?;
-        self.inner.reset();
-        Some(result)
-    }
-
-    pub fn inner_mut(&mut self) -> &mut CompletionInner {
-        &mut self.inner
-    }
-
-    /// Reconstitutes the typed completion from a pointer to its inner slot.
-    ///
-    /// # Safety
-    ///
-    /// `inner` must be the first field of a live instance of this typed
-    /// completion. Backends uphold this by only calling this method on the
-    /// `Operation` arm matching the typed completion that armed the slot.
-    pub unsafe fn from_inner_mut(inner: &mut CompletionInner) -> &mut Self {
-        unsafe { &mut *(inner as *mut CompletionInner as *mut Self) }
-    }
-
-    pub fn complete(&mut self, result: io::Result<usize>) {
-        self.inner.mark_completed();
-        self.result = Some(result);
-    }
-}
-
-impl Default for PWriteCompletion {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-/// Completion slot for an `fsync(2)` operation.
-#[repr(C)]
-pub struct FsyncCompletion {
-    inner: CompletionInner,
-    result: Option<io::Result<()>>,
-}
-
-impl FsyncCompletion {
-    pub fn new() -> Self {
-        Self {
-            inner: CompletionInner::new(),
-            result: None,
-        }
-    }
-
-    pub fn state(&self) -> CompletionState {
-        self.inner.state()
-    }
-
-    pub fn is_idle(&self) -> bool {
-        self.inner.is_idle()
-    }
-
-    pub fn has_result(&self) -> bool {
-        self.result.is_some()
-    }
-
-    pub fn take_result(&mut self) -> Option<io::Result<()>> {
-        let result = self.result.take()?;
-        self.inner.reset();
-        Some(result)
-    }
-
-    pub fn inner_mut(&mut self) -> &mut CompletionInner {
-        &mut self.inner
-    }
-
-    /// Reconstitutes the typed completion from a pointer to its inner slot.
-    ///
-    /// # Safety
-    ///
-    /// `inner` must be the first field of a live instance of this typed
-    /// completion. Backends uphold this by only calling this method on the
-    /// `Operation` arm matching the typed completion that armed the slot.
-    pub unsafe fn from_inner_mut(inner: &mut CompletionInner) -> &mut Self {
-        unsafe { &mut *(inner as *mut CompletionInner as *mut Self) }
-    }
-
-    pub fn complete(&mut self, result: io::Result<()>) {
-        self.inner.mark_completed();
-        self.result = Some(result);
-    }
-}
-
-impl Default for FsyncCompletion {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-/// Completion slot for a file size query. Yields the size in bytes.
-#[repr(C)]
-pub struct SizeCompletion {
-    inner: CompletionInner,
-    result: Option<io::Result<u64>>,
-}
-
-impl SizeCompletion {
-    pub fn new() -> Self {
-        Self {
-            inner: CompletionInner::new(),
-            result: None,
-        }
-    }
-
-    pub fn state(&self) -> CompletionState {
-        self.inner.state()
-    }
-
-    pub fn is_idle(&self) -> bool {
-        self.inner.is_idle()
-    }
-
-    pub fn has_result(&self) -> bool {
-        self.result.is_some()
-    }
-
-    pub fn take_result(&mut self) -> Option<io::Result<u64>> {
-        let result = self.result.take()?;
-        self.inner.reset();
-        Some(result)
-    }
-
-    pub fn inner_mut(&mut self) -> &mut CompletionInner {
-        &mut self.inner
-    }
-
-    /// Reconstitutes the typed completion from a pointer to its inner slot.
-    ///
-    /// # Safety
-    ///
-    /// `inner` must be the first field of a live instance of this typed
-    /// completion. Backends uphold this by only calling this method on the
-    /// `Operation` arm matching the typed completion that armed the slot.
-    pub unsafe fn from_inner_mut(inner: &mut CompletionInner) -> &mut Self {
-        unsafe { &mut *(inner as *mut CompletionInner as *mut Self) }
-    }
-
-    pub fn complete(&mut self, result: io::Result<u64>) {
-        self.inner.mark_completed();
-        self.result = Some(result);
-    }
-}
-
-impl Default for SizeCompletion {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-/// Completion slot for a `mkdir(2)` operation.
-#[repr(C)]
-pub struct MkdirCompletion {
-    inner: CompletionInner,
-    result: Option<io::Result<()>>,
-}
-
-impl MkdirCompletion {
-    pub fn new() -> Self {
-        Self {
-            inner: CompletionInner::new(),
-            result: None,
-        }
-    }
-
-    pub fn state(&self) -> CompletionState {
-        self.inner.state()
-    }
-
-    pub fn is_idle(&self) -> bool {
-        self.inner.is_idle()
-    }
-
-    pub fn has_result(&self) -> bool {
-        self.result.is_some()
-    }
-
-    pub fn take_result(&mut self) -> Option<io::Result<()>> {
-        let result = self.result.take()?;
-        self.inner.reset();
-        Some(result)
-    }
-
-    pub fn inner_mut(&mut self) -> &mut CompletionInner {
-        &mut self.inner
-    }
-
-    /// Reconstitutes the typed completion from a pointer to its inner slot.
-    ///
-    /// # Safety
-    ///
-    /// `inner` must be the first field of a live instance of this typed
-    /// completion. Backends uphold this by only calling this method on the
-    /// `Operation` arm matching the typed completion that armed the slot.
-    pub unsafe fn from_inner_mut(inner: &mut CompletionInner) -> &mut Self {
-        unsafe { &mut *(inner as *mut CompletionInner as *mut Self) }
-    }
-
-    pub fn complete(&mut self, result: io::Result<()>) {
-        self.inner.mark_completed();
-        self.result = Some(result);
-    }
-}
-
-impl Default for MkdirCompletion {
-    fn default() -> Self {
-        Self::new()
-    }
 }
 
 /// The operation currently armed in a completion slot.
