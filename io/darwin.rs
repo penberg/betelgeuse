@@ -14,10 +14,10 @@ use std::{
 use log::trace;
 
 use crate::{
-    AcceptCompletion, AcceptOp, CompletionInner, FsyncCompletion, FsyncOp, IO, IOFile, IOLoop,
-    IOSocket, MkdirCompletion, MkdirOp, OpenOptions, Operation, PReadCompletion, PReadOp,
-    PWriteCompletion, PWriteOp, RecvCompletion, RecvOp, SendCompletion, SendOp, SizeCompletion,
-    SizeOp,
+    AcceptCompletion, AcceptOp, CompletionInner, ConnectCompletion, ConnectOp, FsyncCompletion,
+    FsyncOp, IO, IOFile, IOLoop, IOSocket, MkdirCompletion, MkdirOp, OpenOptions, Operation,
+    PReadCompletion, PReadOp, PWriteCompletion, PWriteOp, RecvCompletion, RecvOp, SendCompletion,
+    SendOp, SizeCompletion, SizeOp,
 };
 
 enum SocketKind {
@@ -169,6 +169,7 @@ impl DarwinIO {
     fn watch_fd(kq: RawFd, c: NonNull<CompletionInner>, op: &Operation) -> io::Result<()> {
         let (fd, filter) = match op {
             Operation::Accept(op) => (op.fd, libc::EVFILT_READ),
+            Operation::Connect(op) => (op.fd, libc::EVFILT_WRITE),
             Operation::Recv(op) => (op.fd, libc::EVFILT_READ),
             Operation::Send(op) => (op.fd, libc::EVFILT_WRITE),
             _ => {
@@ -287,6 +288,40 @@ impl IOSocket for DarwinSocket {
 
         *self.fd.borrow_mut() = Some(fd);
         *self.kind.borrow_mut() = Some(SocketKind::Listener);
+        Ok(())
+    }
+
+    fn connect(&self, c: &mut ConnectCompletion, addr: SocketAddr) -> io::Result<()> {
+        match &*self.kind.borrow() {
+            Some(SocketKind::Listener) => {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "connect called on listener socket",
+                ));
+            }
+            Some(SocketKind::Stream) => {
+                return Err(io::Error::new(
+                    io::ErrorKind::AlreadyExists,
+                    "connect called on already-initialized stream socket",
+                ));
+            }
+            None => {}
+        }
+
+        let fd = DarwinIO::socket_fd(addr)?;
+        let raw_fd = fd.raw();
+        *self.fd.borrow_mut() = Some(fd);
+        *self.kind.borrow_mut() = Some(SocketKind::Stream);
+
+        let inner = c.inner_mut();
+        inner.prepare(Operation::Connect(ConnectOp {
+            fd: raw_fd,
+            addr,
+            started: false,
+            addr_storage: unsafe { mem::zeroed::<libc::sockaddr_storage>() },
+            addr_len: 0,
+        }));
+        queue(&self.state, inner);
         Ok(())
     }
 
@@ -538,6 +573,7 @@ impl IOLoop for DarwinIO {
 fn fail_completion(c: &mut CompletionInner, err: io::Error) {
     match c.operation() {
         Operation::Accept(_) => unsafe { AcceptCompletion::from_inner_mut(c) }.complete(Err(err)),
+        Operation::Connect(_) => unsafe { ConnectCompletion::from_inner_mut(c) }.complete(Err(err)),
         Operation::Recv(_) => unsafe { RecvCompletion::from_inner_mut(c) }.complete(Err(err)),
         Operation::Send(_) => unsafe { SendCompletion::from_inner_mut(c) }.complete(Err(err)),
         Operation::PRead(_) => unsafe { PReadCompletion::from_inner_mut(c) }.complete(Err(err)),
@@ -591,6 +627,70 @@ fn execute_completion(state: &Rc<RefCell<DarwinState>>, c: &mut CompletionInner)
                 }
             };
             unsafe { AcceptCompletion::from_inner_mut(c) }.complete(result);
+            PollResult::Done
+        }
+        Operation::Connect(_) => {
+            let result = {
+                let Operation::Connect(op) = c.operation_mut() else {
+                    unreachable!()
+                };
+
+                if !op.started {
+                    let (storage, len) = socket_addr_to_raw(op.addr);
+                    op.addr_storage = storage;
+                    op.addr_len = len;
+
+                    let rc = unsafe {
+                        libc::connect(
+                            op.fd,
+                            (&op.addr_storage as *const libc::sockaddr_storage).cast(),
+                            op.addr_len,
+                        )
+                    };
+                    if rc == 0 {
+                        Ok(())
+                    } else {
+                        let err = io::Error::last_os_error();
+                        if err.raw_os_error() == Some(libc::EINTR) {
+                            return PollResult::Retry;
+                        }
+                        if err.kind() == io::ErrorKind::WouldBlock
+                            || err.raw_os_error() == Some(libc::EINPROGRESS)
+                            || err.raw_os_error() == Some(libc::EALREADY)
+                        {
+                            op.started = true;
+                            return PollResult::Wait;
+                        }
+                        Err(err)
+                    }
+                } else {
+                    let mut so_error: libc::c_int = 0;
+                    let mut so_error_len = mem::size_of::<libc::c_int>() as libc::socklen_t;
+                    let rc = unsafe {
+                        libc::getsockopt(
+                            op.fd,
+                            libc::SOL_SOCKET,
+                            libc::SO_ERROR,
+                            (&mut so_error as *mut libc::c_int).cast(),
+                            &mut so_error_len,
+                        )
+                    };
+                    if rc < 0 {
+                        let err = io::Error::last_os_error();
+                        if err.raw_os_error() == Some(libc::EINTR) {
+                            return PollResult::Retry;
+                        }
+                        Err(err)
+                    } else if so_error == 0 {
+                        Ok(())
+                    } else if so_error == libc::EINPROGRESS || so_error == libc::EALREADY {
+                        return PollResult::Wait;
+                    } else {
+                        Err(io::Error::from_raw_os_error(so_error))
+                    }
+                }
+            };
+            unsafe { ConnectCompletion::from_inner_mut(c) }.complete(result);
             PollResult::Done
         }
         Operation::Recv(_) => {
