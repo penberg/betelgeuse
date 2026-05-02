@@ -594,12 +594,9 @@ fn fail_completion(c: &mut CompletionInner, err: io::Error) {
 /// take `&mut <kind>Completion` and only set the matching `Operation`, so
 /// the cast back is sound.
 fn execute_completion(state: &Rc<RefCell<DarwinState>>, c: &mut CompletionInner) -> PollResult {
-    match c.operation() {
-        Operation::Accept(_) => {
+    match c.operation_mut() {
+        Operation::Accept(op) => {
             let result = {
-                let Operation::Accept(op) = c.operation_mut() else {
-                    unreachable!()
-                };
                 let accepted =
                     unsafe { libc::accept(op.fd, std::ptr::null_mut(), std::ptr::null_mut()) };
                 if accepted < 0 {
@@ -629,12 +626,8 @@ fn execute_completion(state: &Rc<RefCell<DarwinState>>, c: &mut CompletionInner)
             unsafe { AcceptCompletion::from_inner_mut(c) }.complete(result);
             PollResult::Done
         }
-        Operation::Connect(_) => {
+        Operation::Connect(op) => {
             let result = {
-                let Operation::Connect(op) = c.operation_mut() else {
-                    unreachable!()
-                };
-
                 if !op.started {
                     let (storage, len) = socket_addr_to_raw(op.addr);
                     op.addr_storage = storage;
@@ -693,11 +686,8 @@ fn execute_completion(state: &Rc<RefCell<DarwinState>>, c: &mut CompletionInner)
             unsafe { ConnectCompletion::from_inner_mut(c) }.complete(result);
             PollResult::Done
         }
-        Operation::Recv(_) => {
+        Operation::Recv(op) => {
             let result = {
-                let Operation::Recv(op) = c.operation_mut() else {
-                    unreachable!()
-                };
                 let rc = unsafe {
                     libc::recv(op.fd, op.buf.as_mut_ptr().cast(), op.buf.len(), op.flags)
                 };
@@ -718,11 +708,8 @@ fn execute_completion(state: &Rc<RefCell<DarwinState>>, c: &mut CompletionInner)
             unsafe { RecvCompletion::from_inner_mut(c) }.complete(result);
             PollResult::Done
         }
-        Operation::Send(_) => {
+        Operation::Send(op) => {
             let result = {
-                let Operation::Send(op) = c.operation_mut() else {
-                    unreachable!()
-                };
                 let rc =
                     unsafe { libc::send(op.fd, op.buf.as_ptr().cast(), op.buf.len(), op.flags) };
                 if rc < 0 {
@@ -741,11 +728,8 @@ fn execute_completion(state: &Rc<RefCell<DarwinState>>, c: &mut CompletionInner)
             unsafe { SendCompletion::from_inner_mut(c) }.complete(result);
             PollResult::Done
         }
-        Operation::PRead(_) => {
+        Operation::PRead(op) => {
             let result = {
-                let Operation::PRead(op) = c.operation_mut() else {
-                    unreachable!()
-                };
                 let rc = unsafe {
                     libc::pread(
                         op.fd,
@@ -768,11 +752,8 @@ fn execute_completion(state: &Rc<RefCell<DarwinState>>, c: &mut CompletionInner)
             unsafe { PReadCompletion::from_inner_mut(c) }.complete(result);
             PollResult::Done
         }
-        Operation::PWrite(_) => {
+        Operation::PWrite(op) => {
             let result = {
-                let Operation::PWrite(op) = c.operation_mut() else {
-                    unreachable!()
-                };
                 let rc = unsafe {
                     libc::pwrite(
                         op.fd,
@@ -794,11 +775,8 @@ fn execute_completion(state: &Rc<RefCell<DarwinState>>, c: &mut CompletionInner)
             unsafe { PWriteCompletion::from_inner_mut(c) }.complete(result);
             PollResult::Done
         }
-        Operation::Fsync(_) => {
+        Operation::Fsync(op) => {
             let result = {
-                let Operation::Fsync(op) = c.operation_mut() else {
-                    unreachable!()
-                };
                 let rc = unsafe { libc::fsync(op.fd) };
                 if rc < 0 {
                     let err = io::Error::last_os_error();
@@ -813,11 +791,8 @@ fn execute_completion(state: &Rc<RefCell<DarwinState>>, c: &mut CompletionInner)
             unsafe { FsyncCompletion::from_inner_mut(c) }.complete(result);
             PollResult::Done
         }
-        Operation::Size(_) => {
+        Operation::Size(op) => {
             let result = {
-                let Operation::Size(op) = c.operation_mut() else {
-                    unreachable!()
-                };
                 let mut stat = MaybeUninit::<libc::stat>::uninit();
                 if unsafe { libc::fstat(op.fd, stat.as_mut_ptr()) } == 0 {
                     let stat = unsafe { stat.assume_init() };
@@ -829,11 +804,8 @@ fn execute_completion(state: &Rc<RefCell<DarwinState>>, c: &mut CompletionInner)
             unsafe { SizeCompletion::from_inner_mut(c) }.complete(result);
             PollResult::Done
         }
-        Operation::Mkdir(_) => {
+        Operation::Mkdir(op) => {
             let result = {
-                let Operation::Mkdir(op) = c.operation_mut() else {
-                    unreachable!()
-                };
                 if unsafe { libc::mkdir(op.path.as_ptr(), op.mode as libc::mode_t) } == 0 {
                     Ok(())
                 } else {
