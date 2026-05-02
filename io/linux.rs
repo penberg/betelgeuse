@@ -3,7 +3,7 @@ use std::{
     collections::VecDeque,
     ffi::CString,
     io,
-    mem::{self, MaybeUninit},
+    mem,
     net::SocketAddr,
     os::{fd::RawFd, unix::ffi::OsStrExt},
     path::Path,
@@ -18,8 +18,12 @@ use crate::{
     AcceptCompletion, AcceptOp, CompletionInner, ConnectCompletion, ConnectOp, FsyncCompletion,
     FsyncOp, IO, IOFile, IOLoop, IOSocket, MkdirCompletion, MkdirOp, OpenOptions, Operation,
     PReadCompletion, PReadOp, PWriteCompletion, PWriteOp, RecvCompletion, RecvOp, SendCompletion,
-    SendOp, SizeCompletion, SizeOp,
+    SendOp, StatCompletion, StatOp,
 };
+
+/// Empty C string passed to `IORING_OP_STATX` together with `AT_EMPTY_PATH`,
+/// which makes the call act on the supplied dirfd directly (i.e. fstat).
+const EMPTY_PATH: &[libc::c_char; 1] = &[0];
 
 enum SocketKind {
     Listener,
@@ -115,12 +119,14 @@ impl IoUringIO {
             Operation::PRead(_)
             | Operation::PWrite(_)
             | Operation::Fsync(_)
-            | Operation::Mkdir(_) => errno == libc::EINTR,
-            Operation::Size(_) | Operation::Nop => false,
+            | Operation::Mkdir(_)
+            | Operation::Stat(_) => errno == libc::EINTR,
+            Operation::Nop => false,
         }
     }
 
     fn prepare_entry(c: &mut CompletionInner) -> squeue::Entry {
+        let user_data = c as *mut CompletionInner as u64;
         let entry = match c.operation_mut() {
             Operation::Accept(op) => {
                 opcode::Accept::new(types::Fd(op.fd), std::ptr::null_mut(), std::ptr::null_mut())
@@ -164,12 +170,23 @@ impl IoUringIO {
                     .mode(op.mode)
                     .build()
             }
-            Operation::Size(_) => {
-                unreachable!("Size is handled inline; should never reach prepare_entry")
+            Operation::Stat(op) => {
+                let fd = op.fd;
+                // SAFETY: Stat completions arm Operation::Stat, so the inner
+                // is the prefix of a StatCompletion that owns the statx buf.
+                let statx = unsafe { StatCompletion::from_inner_mut(c) }.statx_ptr();
+                opcode::Statx::new(
+                    types::Fd(fd),
+                    EMPTY_PATH.as_ptr(),
+                    statx as *mut types::statx,
+                )
+                .flags(libc::AT_EMPTY_PATH)
+                .mask(libc::STATX_SIZE)
+                .build()
             }
             Operation::Nop => unreachable!("Nop cannot be queued"),
         };
-        entry.user_data(c as *mut CompletionInner as u64)
+        entry.user_data(user_data)
     }
 
     /// Stores the typed result for the operation armed in `c` directly into
@@ -249,20 +266,15 @@ impl IoUringIO {
                 };
                 unsafe { FsyncCompletion::from_inner_mut(c) }.complete(r);
             }
-            Operation::Size(_) => {
-                let r = {
-                    let Operation::Size(op) = c.operation_mut() else {
-                        unreachable!()
-                    };
-                    let mut stat = MaybeUninit::<libc::stat>::uninit();
-                    if unsafe { libc::fstat(op.fd, stat.as_mut_ptr()) } < 0 {
-                        Err(io::Error::last_os_error())
-                    } else {
-                        let stat = unsafe { stat.assume_init() };
-                        Ok(stat.st_size as u64)
-                    }
+            Operation::Stat(_) => {
+                let size_c = unsafe { StatCompletion::from_inner_mut(c) };
+                let r = if result < 0 {
+                    Err(io_uring_err(result))
+                } else {
+                    // SAFETY: kernel populated the statx buffer on success.
+                    Ok(unsafe { size_c.statx_size() })
                 };
-                unsafe { SizeCompletion::from_inner_mut(c) }.complete(r);
+                size_c.complete(r);
             }
             Operation::Mkdir(_) => {
                 let r = if result < 0 {
@@ -375,9 +387,9 @@ impl IOFile for IoUringFile {
         Ok(())
     }
 
-    fn size(&self, c: &mut SizeCompletion) -> io::Result<()> {
+    fn stat(&self, c: &mut StatCompletion) -> io::Result<()> {
         let inner = c.inner_mut();
-        inner.prepare(Operation::Size(SizeOp { fd: self.fd.raw() }));
+        inner.prepare(Operation::Stat(StatOp { fd: self.fd.raw() }));
         queue(&self.state, inner);
         Ok(())
     }
@@ -634,7 +646,6 @@ impl IO for IoUringIO {
 impl IOLoop for IoUringIO {
     fn step(&self) -> io::Result<bool> {
         let mut progressed = false;
-        let mut size_ops = Vec::new();
 
         {
             let mut state = self.state.borrow_mut();
@@ -646,16 +657,6 @@ impl IOLoop for IoUringIO {
                     None => break,
                 };
                 let completion = unsafe { completion_ptr.as_ptr().as_mut().expect("non-null") };
-
-                if matches!(completion.operation(), Operation::Size(_)) {
-                    if state.inflight > 0 {
-                        state.queued.push_front(completion_ptr);
-                        break;
-                    }
-                    size_ops.push(completion_ptr);
-                    progressed = true;
-                    continue;
-                }
 
                 let entry = Self::prepare_entry(completion);
                 let mut submission = state.ring.submission();
@@ -674,11 +675,6 @@ impl IOLoop for IoUringIO {
             if submitted > 0 {
                 state.ring.submit()?;
             }
-        }
-
-        for completion_ptr in size_ops {
-            let completion = unsafe { completion_ptr.as_ptr().as_mut().expect("non-null") };
-            Self::dispatch_complete(&self.state, completion, 0);
         }
 
         let mut completed = Vec::new();

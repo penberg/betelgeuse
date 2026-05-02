@@ -3,7 +3,7 @@
 //! There is one concrete completion type per operation kind:
 //! [`AcceptCompletion`], [`RecvCompletion`], [`SendCompletion`],
 //! [`PReadCompletion`], [`PWriteCompletion`], [`FsyncCompletion`],
-//! [`SizeCompletion`], [`MkdirCompletion`]. Each is a thin wrapper around
+//! [`StatCompletion`], [`MkdirCompletion`]. Each is a thin wrapper around
 //! [`CompletionInner`] (the shared state machine and operation slot) and
 //! carries its own typed result.
 //!
@@ -144,11 +144,6 @@ define_completion!(
 );
 
 define_completion!(
-    /// Completion slot for a file size query. Yields the size in bytes.
-    pub struct SizeCompletion => io::Result<u64>
-);
-
-define_completion!(
     /// Completion slot for a `mkdir(2)` operation.
     pub struct MkdirCompletion => io::Result<()>
 );
@@ -250,6 +245,90 @@ pub enum CompletionState {
     Completed,
 }
 
+/// Completion slot for a file stat operation. Yields the file size in bytes.
+///
+/// On Linux this carries an embedded `statx` buffer that the io_uring
+/// `IORING_OP_STATX` writes into asynchronously; the buffer must outlive
+/// the submission, so it lives in the completion the caller already owns.
+#[repr(C)]
+pub struct StatCompletion {
+    inner: CompletionInner,
+    result: Option<io::Result<u64>>,
+    #[cfg(target_os = "linux")]
+    statx: Box<std::mem::MaybeUninit<libc::statx>>,
+}
+
+impl StatCompletion {
+    pub fn new() -> Self {
+        Self {
+            inner: CompletionInner::new(),
+            result: None,
+            #[cfg(target_os = "linux")]
+            statx: Box::new(std::mem::MaybeUninit::uninit()),
+        }
+    }
+
+    pub fn state(&self) -> CompletionState {
+        self.inner.state()
+    }
+
+    pub fn is_idle(&self) -> bool {
+        self.inner.is_idle()
+    }
+
+    pub fn has_result(&self) -> bool {
+        self.result.is_some()
+    }
+
+    pub fn take_result(&mut self) -> Option<io::Result<u64>> {
+        let result = self.result.take()?;
+        self.inner.reset();
+        Some(result)
+    }
+
+    pub fn inner_mut(&mut self) -> &mut CompletionInner {
+        &mut self.inner
+    }
+
+    /// Reconstitutes the typed completion from a pointer to its inner slot.
+    ///
+    /// # Safety
+    ///
+    /// `inner` must be the first field of a live instance of this typed
+    /// completion. Backends uphold this by only calling this method on the
+    /// `Operation` arm matching the typed completion that armed the slot.
+    pub unsafe fn from_inner_mut(inner: &mut CompletionInner) -> &mut Self {
+        unsafe { &mut *(inner as *mut CompletionInner as *mut Self) }
+    }
+
+    /// Returns a raw pointer to the embedded `statx` buffer for io_uring to
+    /// write into. The buffer is alive as long as `self` is alive.
+    #[cfg(target_os = "linux")]
+    pub fn statx_ptr(&mut self) -> *mut libc::statx {
+        self.statx.as_mut_ptr()
+    }
+
+    /// # Safety
+    ///
+    /// The kernel must have populated the `statx` buffer (i.e. the matching
+    /// io_uring CQE returned success).
+    #[cfg(target_os = "linux")]
+    pub unsafe fn statx_size(&self) -> u64 {
+        unsafe { (*self.statx.as_ptr()).stx_size }
+    }
+
+    pub fn complete(&mut self, result: io::Result<u64>) {
+        self.inner.mark_completed();
+        self.result = Some(result);
+    }
+}
+
+impl Default for StatCompletion {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 /// The operation currently armed in a completion slot.
 ///
 /// Backends translate this enum into concrete syscalls or `io_uring`
@@ -272,8 +351,8 @@ pub enum Operation {
     PWrite(PWriteOp),
     /// Flush file data to stable storage.
     Fsync(FsyncOp),
-    /// Read file size metadata.
-    Size(SizeOp),
+    /// Read file metadata.
+    Stat(StatOp),
     /// Create one directory.
     Mkdir(MkdirOp),
 }
@@ -325,8 +404,8 @@ pub struct FsyncOp {
     pub fd: RawFd,
 }
 
-/// Payload for a file size query.
-pub struct SizeOp {
+/// Payload for a file stat operation.
+pub struct StatOp {
     pub fd: RawFd,
 }
 

@@ -17,7 +17,7 @@ use crate::{
     AcceptCompletion, AcceptOp, CompletionInner, ConnectCompletion, ConnectOp, FsyncCompletion,
     FsyncOp, IO, IOFile, IOLoop, IOSocket, MkdirCompletion, MkdirOp, OpenOptions, Operation,
     PReadCompletion, PReadOp, PWriteCompletion, PWriteOp, RecvCompletion, RecvOp, SendCompletion,
-    SendOp, SizeCompletion, SizeOp,
+    SendOp, StatCompletion, StatOp,
 };
 
 enum SocketKind {
@@ -236,9 +236,9 @@ impl IOFile for DarwinFile {
         Ok(())
     }
 
-    fn size(&self, c: &mut SizeCompletion) -> io::Result<()> {
+    fn stat(&self, c: &mut StatCompletion) -> io::Result<()> {
         let inner = c.inner_mut();
-        inner.prepare(Operation::Size(SizeOp { fd: self.fd.raw() }));
+        inner.prepare(Operation::Stat(StatOp { fd: self.fd.raw() }));
         queue(&self.state, inner);
         Ok(())
     }
@@ -579,7 +579,7 @@ fn fail_completion(c: &mut CompletionInner, err: io::Error) {
         Operation::PRead(_) => unsafe { PReadCompletion::from_inner_mut(c) }.complete(Err(err)),
         Operation::PWrite(_) => unsafe { PWriteCompletion::from_inner_mut(c) }.complete(Err(err)),
         Operation::Fsync(_) => unsafe { FsyncCompletion::from_inner_mut(c) }.complete(Err(err)),
-        Operation::Size(_) => unsafe { SizeCompletion::from_inner_mut(c) }.complete(Err(err)),
+        Operation::Stat(_) => unsafe { StatCompletion::from_inner_mut(c) }.complete(Err(err)),
         Operation::Mkdir(_) => unsafe { MkdirCompletion::from_inner_mut(c) }.complete(Err(err)),
         Operation::Nop => {}
     }
@@ -791,7 +791,7 @@ fn execute_completion(state: &Rc<RefCell<DarwinState>>, c: &mut CompletionInner)
             unsafe { FsyncCompletion::from_inner_mut(c) }.complete(result);
             PollResult::Done
         }
-        Operation::Size(op) => {
+        Operation::Stat(op) => {
             let result = {
                 let mut stat = MaybeUninit::<libc::stat>::uninit();
                 if unsafe { libc::fstat(op.fd, stat.as_mut_ptr()) } == 0 {
@@ -801,7 +801,7 @@ fn execute_completion(state: &Rc<RefCell<DarwinState>>, c: &mut CompletionInner)
                     Err(io::Error::last_os_error())
                 }
             };
-            unsafe { SizeCompletion::from_inner_mut(c) }.complete(result);
+            unsafe { StatCompletion::from_inner_mut(c) }.complete(result);
             PollResult::Done
         }
         Operation::Mkdir(op) => {
