@@ -15,8 +15,9 @@ use std::{
 };
 
 use betelgeuse::{
-    AcceptCompletion, FsyncCompletion, IO, IOLoop, IOLoopHandle, MkdirCompletion, OpenOptions,
-    PReadCompletion, PWriteCompletion, RecvCompletion, SendCompletion, SizeCompletion, io_loop,
+    AcceptCompletion, ConnectCompletion, FsyncCompletion, IO, IOLoop, IOLoopHandle,
+    MkdirCompletion, OpenOptions, PReadCompletion, PWriteCompletion, RecvCompletion,
+    SendCompletion, SizeCompletion, io_loop,
 };
 use tempfile::TempDir;
 
@@ -270,6 +271,47 @@ io_test! {
             Ok(_) => panic!("mkdir on existing dir should fail"),
             Err(err) => assert_eq!(err.kind(), io::ErrorKind::AlreadyExists),
         }
+        Ok(())
+    }
+}
+
+io_test! {
+    fn connect_send_recv_with_std_listener(io_loop) -> io::Result<()> {
+        let port = free_port();
+        let addr: SocketAddr = format!("127.0.0.1:{port}").parse().unwrap();
+
+        let listener = std::net::TcpListener::bind(addr).unwrap();
+
+        let client = io_loop.io().socket()?;
+        let mut connect_c = ConnectCompletion::new();
+        client.connect(&mut connect_c, addr)?;
+        while !connect_c.has_result() {
+            io_loop.step()?;
+        }
+        connect_c.take_result().unwrap()?;
+
+        let (mut accepted, _) = listener.accept().unwrap();
+
+        let mut send_c = SendCompletion::new();
+        client.send(&mut send_c, b"ping".to_vec())?;
+        while !send_c.has_result() {
+            io_loop.step()?;
+        }
+        assert_eq!(send_c.take_result().unwrap()?, 4);
+
+        let mut buf = [0u8; 4];
+        accepted.read_exact(&mut buf).unwrap();
+        assert_eq!(&buf, b"ping");
+
+        accepted.write_all(b"pong").unwrap();
+
+        let mut recv_c = RecvCompletion::new();
+        client.recv(&mut recv_c, 4)?;
+        while !recv_c.has_result() {
+            io_loop.step()?;
+        }
+        assert_eq!(&recv_c.take_result().unwrap()?, b"pong");
+
         Ok(())
     }
 }
