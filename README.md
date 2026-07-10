@@ -39,6 +39,10 @@ Out of scope: wire protocols, framing, buffer pools, state machines, WAL, consen
 - [`examples/echo`](examples/echo/README.md) - minimal TCP echo server showing the basic `server.step(); io_loop.step();` shape.
 - [`examples/memcached`](examples/memcached/README.md) - in-memory memcached-style server using the same completion-driven model on a less trivial protocol.
 
+## 🚀 Projects Using Betelgeuse
+
+- [tina-rs](https://github.com/russellromney/tina-rs) - a bounded Rust concurrency framework for services built from isolated state machines, using Betelgeuse for runtime I/O.
+
 ## 🔗 References
 
 [1] Pekka Enberg, Ashwin Rao, and Sasu Tarkoma (2019). [I/O Is Faster Than the CPU - Let's Partition Resources and Eliminate (Most) OS Abstractions](https://penberg.org/parakernel-hotos19.pdf).
