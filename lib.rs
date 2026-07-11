@@ -208,13 +208,18 @@ pub fn io_loop<A: Allocator + Clone>(allocator: A) -> stdio::Result<IOLoopHandle
         let inner: Rc<dyn IOLoop> = Rc::new(io::darwin::DarwinIO::new()?);
         return Ok(IOLoopHandle::new(inner, allocator));
     }
-    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    #[cfg(target_os = "windows")]
+    {
+        let inner: Rc<dyn IOLoop> = Rc::new(io::windows::WindowsIO::new()?);
+        return Ok(IOLoopHandle::new(inner, allocator));
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
     {
         let _ = allocator;
         Err(stdio::Error::new(
             stdio::ErrorKind::Unsupported,
             format!(
-                "betelgeuse is supported on Linux and macOS only (got {})",
+                "betelgeuse is supported on Linux, macOS, and Windows only (got {})",
                 std::env::consts::OS
             ),
         ))

@@ -60,7 +60,7 @@ macro_rules! io_test {
 io_test! {
     fn backend_name_survives_io_handle(io_loop) -> io::Result<()> {
         let name = io_loop.backend_name();
-        assert!(name == "linux" || name == "darwin");
+        assert!(name == "linux" || name == "darwin" || name == "windows");
         assert_eq!(io_loop.io().backend_name(), name);
         Ok(())
     }
