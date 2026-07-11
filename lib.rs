@@ -36,7 +36,7 @@ pub mod task;
 pub use completion::{
     AcceptCompletion, AcceptOp, ConnectCompletion, ConnectOp, FsyncCompletion, FsyncOp,
     MkdirCompletion, MkdirOp, PReadCompletion, PReadOp, PWriteCompletion, PWriteOp, RecvCompletion,
-    RecvOp, SendCompletion, SendOp, SizeCompletion, SizeOp,
+    RecvOp, SendCompletion, SendOp, StatCompletion, StatOp,
 };
 
 pub use completion::{CompletionInner, Operation};
@@ -96,6 +96,10 @@ pub struct OpenOptions {
 /// A file object is a handle that submits work into caller-owned typed
 /// completion slots. The backend later completes those slots with the
 /// matching typed result (`Vec<u8>` for reads, `usize` for writes, etc.).
+///
+/// In-flight operations are not ordered relative to each other. Callers
+/// that need one operation to observe another's effect must wait for the
+/// first completion before submitting the second.
 pub trait IOFile {
     /// Reads up to `len` bytes starting at `offset`.
     fn pread(&self, c: &mut PReadCompletion, len: usize, offset: u64) -> stdio::Result<()>;
@@ -106,8 +110,8 @@ pub trait IOFile {
     /// Flushes file data to stable storage.
     fn fsync(&self, c: &mut FsyncCompletion) -> stdio::Result<()>;
 
-    /// Reads the current file size.
-    fn size(&self, c: &mut SizeCompletion) -> stdio::Result<()>;
+    /// Reads file metadata. The completion yields the file size in bytes.
+    fn stat(&self, c: &mut StatCompletion) -> stdio::Result<()>;
 }
 
 /// Backend-agnostic socket operations.
