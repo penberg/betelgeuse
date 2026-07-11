@@ -25,7 +25,17 @@
 //!
 //! [`IOSocket::recv`]: super::IOSocket::recv
 
-use std::{ffi::CString, io, net::SocketAddr, os::fd::RawFd};
+#[cfg(unix)]
+use std::ffi::CString;
+#[cfg(unix)]
+use std::os::fd::RawFd;
+use std::{io, net::SocketAddr};
+
+/// Raw platform I/O handle stored in operation payloads. On Windows this
+/// holds either a file `HANDLE` or a `SOCKET`, both of which are
+/// pointer-sized integers.
+#[cfg(windows)]
+pub type RawFd = usize;
 
 use super::IOSocket;
 
@@ -288,7 +298,9 @@ pub struct ConnectOp {
     pub fd: RawFd,
     pub addr: SocketAddr,
     pub started: bool,
+    #[cfg(unix)]
     pub addr_storage: libc::sockaddr_storage,
+    #[cfg(unix)]
     pub addr_len: libc::socklen_t,
 }
 
@@ -338,7 +350,11 @@ pub struct StatOp {
 
 /// Payload for a `mkdir(2)` operation.
 pub struct MkdirOp {
+    /// NUL-terminated native path (bytes on Unix, UTF-16 on Windows).
+    #[cfg(unix)]
     pub path: CString,
+    #[cfg(windows)]
+    pub path: Vec<u16>,
     pub mode: u32,
 }
 
