@@ -1,0 +1,25 @@
+[package]
+name = "betelgeuse-http"
+version.workspace = true
+authors.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "HTTP/1.1 client for Betelgeuse"
+
+[lib]
+path = "lib.rs"
+
+[[example]]
+name = "fetch"
+path = "examples/fetch/main.rs"
+
+[[bench]]
+name = "fetch"
+path = "benches/fetch.rs"
+harness = false
+
+[dependencies]
+betelgeuse = { path = "../core" }
+
+[dev-dependencies]
+criterion = { version = "0.8", default-features = false, features = ["cargo_bench_support"] }

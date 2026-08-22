@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["core"]
+members = ["core", "http"]
 
 [workspace.package]
 version = "0.1.0"
