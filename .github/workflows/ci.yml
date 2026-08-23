@@ -21,8 +21,8 @@ jobs:
       - name: Check out repository
         uses: actions/checkout@v4
 
-      - name: Install nightly Rust
-        uses: dtolnay/rust-toolchain@nightly
+      - name: Install the pinned Rust toolchain
+        run: rustup toolchain install --profile minimal --no-self-update
 
       - name: Cache cargo artifacts
         uses: Swatinem/rust-cache@v2

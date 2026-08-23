@@ -1,2 +1,5 @@
 [toolchain]
-channel = "nightly"
+# Pinned deliberately: the crate builds on unstable features (allocator_api,
+# coroutines) whose APIs change under it on newer nightlies. Bumping this is a
+# change to make on purpose, with the code fixed in the same commit.
+channel = "nightly-2026-07-26"
