@@ -28,7 +28,7 @@ jobs:
         uses: Swatinem/rust-cache@v2
 
       - name: Run tests
-        run: cargo test --locked
+        run: cargo test --locked --workspace
 
       - name: Build examples
-        run: cargo build --locked --examples
+        run: cargo build --locked --workspace --examples

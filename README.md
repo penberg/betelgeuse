@@ -36,8 +36,8 @@ Out of scope: wire protocols, framing, buffer pools, state machines, WAL, consen
 
 ## 🧪 Examples
 
-- [`examples/echo`](examples/echo/README.md) - minimal TCP echo server showing the basic `server.step(); io_loop.step();` shape.
-- [`examples/memcached`](examples/memcached/README.md) - in-memory memcached-style server using the same completion-driven model on a less trivial protocol.
+- [`core/examples/echo`](core/examples/echo/README.md) - minimal TCP echo server showing the basic `server.step(); io_loop.step();` shape.
+- [`core/examples/memcached`](core/examples/memcached/README.md) - in-memory memcached-style server using the same completion-driven model on a less trivial protocol.
 
 ## 🚀 Projects Using Betelgeuse
 
