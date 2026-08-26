@@ -6,4 +6,4 @@ members = ["core", "http"]
 version = "0.1.0"
 authors = ["Pekka Enberg"]
 edition = "2024"
-license = "MIT OR Apache-2.0"
+license = "MIT"

@@ -1,18 +1,39 @@
-<h1 align="center">Betelgeuse</h1>
+<div align="center">
 
-<p align="center">
-  Completion-based I/O for Rust. No runtime, no hidden tasks.
+<img src=".github/assets/hero.png" alt="Betelgeuse" width="480">
+
+<h1>Betelgeuse</h1>
+
+<p>
+  <b>Completion-based I/O for Rust. No runtime, no hidden tasks.</b>
 </p>
+
+<p>
+  <a href="https://github.com/penberg/betelgeuse/actions/workflows/ci.yml"><img src="https://github.com/penberg/betelgeuse/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
+  <img src="https://img.shields.io/badge/rust-nightly-orange.svg" alt="Rust nightly">
+  <img src="https://img.shields.io/badge/license-MIT-blue.svg" alt="License: MIT">
+</p>
+
+<p>
+  <a href="#-why">Why</a> &nbsp;&middot;&nbsp;
+  <a href="#-scope">Scope</a> &nbsp;&middot;&nbsp;
+  <a href="#%EF%B8%8F-design">Design</a> &nbsp;&middot;&nbsp;
+  <a href="#-examples">Examples</a> &nbsp;&middot;&nbsp;
+  <a href="#-projects-using-betelgeuse">Projects</a> &nbsp;&middot;&nbsp;
+  <a href="#-references">References</a>
+</p>
+
+</div>
 
 ## 💡 Why
 
-Asynchronous I/O is a must for modern servers: blocking a thread per operation does not scale because it cannot leverage the parallelism of storage and network devices. In Rust, that usually means using futures with `async` and `await`, backed by a large ecosystem including [Tokio](https://tokio.rs/). However, the futures model has problems that matter for high-performance servers under load [[2]](#references):
+Asynchronous I/O is a must for modern servers: blocking a thread per operation does not scale because it cannot leverage the parallelism of storage and network devices. In Rust, that usually means using futures with `async` and `await`, backed by a large ecosystem including [Tokio](https://tokio.rs/). However, the futures model has problems that matter for high-performance servers under load [[2]](#-references):
 
 - The model is designed for multi-threading, which can itself hinder high performance due to synchronization.
 - You can spawn any amount of work by default until queues grow beyond memory limits.
 - Work-stealing moves computation between cores, resulting in CPU cache misses.
 
-Betelgeuse takes a different direction for asynchronous I/O, inspired by [TigerBeetle](https://github.com/tigerbeetle/tigerbeetle). A single thread loops forever, calling `step()` on two objects: the server and the I/O loop. The caller owns completions; state transitions happen in one place, and nothing advances unless explicitly asked to—no waker, no executor, no hidden tasks. Modern I/O devices are fast enough that CPU-side abstractions and kernel overhead can become the bottleneck, so Betelgeuse aims to keep that path direct and eliminate as much overhead as possible [[1]](#references).
+Betelgeuse takes a different direction for asynchronous I/O, inspired by [TigerBeetle](https://github.com/tigerbeetle/tigerbeetle). A single thread loops forever, calling `step()` on two objects: the server and the I/O loop. The caller owns completions; state transitions happen in one place, and nothing advances unless explicitly asked to—no waker, no executor, no hidden tasks. Modern I/O devices are fast enough that CPU-side abstractions and kernel overhead can become the bottleneck, so Betelgeuse aims to keep that path direct and eliminate as much overhead as possible [[1]](#-references).
 
 The I/O model also works well with deterministic simulation testing. Once nothing runs on its own, a simulation backend can drive the same server binary under controlled time, I/O ordering, and fault injection — without changing a line of application code.
 
